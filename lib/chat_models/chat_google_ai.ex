@@ -295,6 +295,27 @@ defmodule LangChain.ChatModels.ChatGoogleAI do
     }
   end
 
+  def for_api(%ContentPart{type: :file, options: opts} = part) do
+    media = Keyword.get(opts || [], :media, nil)
+
+    mime_type =
+      if is_nil(media) do
+        message = "Received no media type for ContentPart"
+        Logger.error(message)
+        raise LangChainError, message
+      else
+        "#{media}"
+      end
+
+
+    %{
+      "inline_data" => %{
+        "mime_type" => mime_type,
+        "data" => part.content
+      }
+    }
+  end
+
   def for_api(%Message{content: content} = message) when is_binary(content) do
     %{
       "role" => map_role(message.role),
