@@ -1990,4 +1990,23 @@ defmodule LangChain.Chains.LLMChain do
   end
 
   defp raise_when_no_messages(%LLMChain{} = chain), do: chain
+
+  def cache(%LLMChain{} = chain) do
+    %module{} = chain.llm
+
+    case module.cache(chain.llm, chain.messages, chain.tools) do
+      {:ok, :noop} ->
+        # Google has a minimum size limit. If you try to cache a file that is too small you get a 400,
+        # but we'll just swallow that error and return the chain, unmodified.
+        {:ok, chain}
+
+      {:ok, llm} ->
+        # This means we've cached things successfully, so we aren't allowed to send subsequent messages
+        # or tools which are already cached
+        {:ok, %{chain | llm: llm, messages: [], tools: []}}
+
+      other ->
+        other
+    end
+  end
 end
