@@ -1210,11 +1210,14 @@ defmodule LangChain.ChatModels.ChatGoogleAI do
     |> use_sse(google_ai)
   end
 
-  def cache(google_ai, messages, tools) do
+  def cache(google_ai, cache_opts, messages, tools) do
+    ttl = Keyword.get(cache_opts, :ttl, nil)
+
     body =
       for_api(google_ai, messages, tools)
       |> Map.take(["contents", "system_instruction", "tools"])
-      |> Map.put("model", "models/#{google_ai.model}")
+      |> Map.put(:model, "models/#{google_ai.model}")
+      |> Utils.conditionally_add_to_map(:ttl, ttl)
 
     Req.new(
       url: build_cache_url(google_ai),
