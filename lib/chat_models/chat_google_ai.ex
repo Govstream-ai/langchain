@@ -133,6 +133,10 @@ defmodule LangChain.ChatModels.ChatGoogleAI do
     # Refer to `https://hexdocs.pm/req/Req.html#new/1-options` for
     # `Req.new` supported set of options.
     field :req_config, :map, default: %{}
+
+    # Cached content, see here:
+    # https://ai.google.dev/api/caching#cache_create-SHELL
+    field :cached_content, :string, default: nil
   end
 
   @type t :: %ChatGoogleAI{}
@@ -250,6 +254,7 @@ defmodule LangChain.ChatModels.ChatGoogleAI do
       }
       |> Utils.conditionally_add_to_map("system_instruction", system_instruction)
       |> Utils.conditionally_add_to_map("safetySettings", google_ai.safety_settings)
+      |> Utils.conditionally_add_to_map("cachedContent", google_ai.cached_content)
 
     if functions && not Enum.empty?(functions) do
       native_tools = Enum.filter(functions, &match?(%NativeTool{}, &1))
@@ -306,7 +311,6 @@ defmodule LangChain.ChatModels.ChatGoogleAI do
       else
         "#{media}"
       end
-
 
     %{
       "inline_data" => %{
@@ -1008,7 +1012,8 @@ defmodule LangChain.ChatModels.ChatGoogleAI do
         :json_response,
         :json_schema,
         :stream,
-        :safety_settings
+        :safety_settings,
+        :cached_content
       ],
       @current_config_version
     )
@@ -1199,4 +1204,44 @@ defmodule LangChain.ChatModels.ChatGoogleAI do
   end
 
   defp maybe_add_search_entry_point(metadata, _), do: metadata
+
+  defp build_cache_url(%ChatGoogleAI{endpoint: endpoint, api_version: api_version} = google_ai) do
+    "#{endpoint}/#{api_version}/cachedContents?key=#{get_api_key(google_ai)}"
+    |> use_sse(google_ai)
+  end
+
+  def cache(google_ai, messages, tools) do
+    body =
+      for_api(google_ai, messages, tools)
+      |> Map.take(["contents", "system_instruction", "tools"])
+      |> Map.put("model", "models/#{google_ai.model}")
+
+    Req.new(
+      url: build_cache_url(google_ai),
+      json: body,
+      receive_timeout: google_ai.receive_timeout,
+      retry: :transient,
+      max_retries: 3,
+      retry_delay: fn attempt -> 300 * attempt end
+    )
+    |> Req.merge(google_ai.req_config |> Keyword.new())
+    |> Req.post()
+    |> case do
+      {:ok, resp = %Req.Response{status: 400, body: %{"error" => %{"message" => message}}}} ->
+        if String.contains?(message, "Cached content is too small.") do
+          {:ok, :noop}
+        else
+          {:error, resp}
+        end
+
+      {:ok, %Req.Response{status: 200, body: %{"name" => cache_name}}} ->
+        {:ok, %{google_ai | cached_content: cache_name}}
+
+      {:ok, error} ->
+        {:error, error}
+
+      {:error, error} ->
+        {:error, error}
+    end
+  end
 end

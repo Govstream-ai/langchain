@@ -307,6 +307,10 @@ defmodule LangChain.Function do
     changeset
   end
 
+  defp do_validate_function_arity({_m, _f, 2}, changeset) do
+    changeset
+  end
+
   defp do_validate_function_arity(function, changeset) when is_function(function) do
     {:arity, arity} = Elixir.Function.info(function, :arity)
     add_error(changeset, :function, "expected arity of 2 but has arity #{inspect(arity)}")
