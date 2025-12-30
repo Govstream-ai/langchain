@@ -598,6 +598,20 @@ defmodule LangChain.ChatModels.ChatOpenAI do
           | Function.t()
         ) ::
           %{String.t() => any()} | [%{String.t() => any()}]
+
+  def for_api(%_{} = model, %Message{role: :tool, tool_results: tool_results} = _msg)
+      when is_list(tool_results) do
+    # ToolResults turn into a list of tool messages for OpenAI
+
+    Enum.map(tool_results, fn result ->
+      %{
+        "role" => :tool,
+        "tool_call_id" => result.tool_call_id,
+        "content" => content_parts_for_api(model, result.content)
+      }
+    end)
+  end
+
   def for_api(%_{} = model, %Message{content: content} = msg) when is_list(content) do
     role = get_message_role(model, msg.role)
 
@@ -632,23 +646,12 @@ defmodule LangChain.ChatModels.ChatOpenAI do
 
   def for_api(%_{} = model, %ToolResult{type: :function} = result) do
     # a ToolResult becomes a stand-alone %Message{role: :tool} response.
+
     %{
       "role" => :tool,
       "tool_call_id" => result.tool_call_id,
       "content" => content_parts_for_api(model, result.content)
     }
-  end
-
-  def for_api(%_{} = model, %Message{role: :tool, tool_results: tool_results} = _msg)
-      when is_list(tool_results) do
-    # ToolResults turn into a list of tool messages for OpenAI
-    Enum.map(tool_results, fn result ->
-      %{
-        "role" => :tool,
-        "tool_call_id" => result.tool_call_id,
-        "content" => content_parts_for_api(model, result.content)
-      }
-    end)
   end
 
   # ToolCall support
