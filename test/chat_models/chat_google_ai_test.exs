@@ -956,7 +956,8 @@ defmodule ChatModels.ChatGoogleAITest do
                "top_p" => 1.0,
                "safety_settings" => [],
                "json_response" => false,
-               "json_schema" => nil
+               "json_schema" => nil,
+               "cached_content" => nil
              }
     end
   end
