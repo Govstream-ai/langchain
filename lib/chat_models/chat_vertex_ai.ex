@@ -216,8 +216,8 @@ defmodule LangChain.ChatModels.ChatVertexAI do
       }
       |> Utils.conditionally_add_to_map("system_instruction", for_api(sys_instructions))
       # When content is cached, `cachedContent` carries the system instruction and
-      # tools; Vertex rejects re-sending them, but `cache/4` blanks them on the
-      # chain, so nothing to guard against here.
+      # tools; Vertex rejects re-sending them. `LLMChain.cache/2` already blanks
+      # the chain's messages/tools after caching, so there's nothing to strip here.
       |> Utils.conditionally_add_to_map("cachedContent", vertex_ai.cached_content)
 
     if functions && not Enum.empty?(functions) do
@@ -733,12 +733,17 @@ defmodule LangChain.ChatModels.ChatVertexAI do
   end
 
   # The cache body's `model` is the full resource path, e.g.
-  # projects/P/locations/L/publishers/google/models/MODEL — the endpoint's
-  # post-`/v1/` path plus the model.
+  # projects/P/locations/L/publishers/google/models/MODEL — the endpoint's path
+  # with the leading API-version segment (`v1`, `v1beta1`, …) dropped.
   @spec cache_model_ref(t()) :: String.t()
   defp cache_model_ref(%ChatVertexAI{endpoint: endpoint, model: model}) do
-    path = endpoint |> String.split("/v1/", parts: 2) |> List.last()
-    "#{path}/models/#{model}"
+    resource =
+      URI.parse(endpoint).path
+      |> String.trim_leading("/")
+      |> String.split("/", parts: 2)
+      |> List.last()
+
+    "#{resource}/models/#{model}"
   end
 
   def complete_final_delta(data) when is_list(data) do

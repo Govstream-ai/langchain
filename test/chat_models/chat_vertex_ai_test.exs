@@ -331,6 +331,22 @@ defmodule ChatModels.ChatVertexAITest do
              } in parts
     end
 
+    test "resolves the :media atom shorthands to a mimetype", %{vertex_ai: vertex_ai} do
+      # Callers may pass the codebase-wide `:pdf`/`:csv` atoms instead of a raw
+      # MIME string; both resolve to the same inlineData mimeType.
+      for {media, mime} <- [{:pdf, "application/pdf"}, {:csv, "text/csv"}] do
+        data =
+          ChatVertexAI.for_api(
+            vertex_ai,
+            [Message.new_user!([ContentPart.file!("base64-data", media: media)])],
+            []
+          )
+
+        assert %{"contents" => [%{"parts" => parts}]} = data
+        assert %{"inlineData" => %{"mimeType" => mime, "data" => "base64-data"}} in parts
+      end
+    end
+
     test "preserves media as nested functionResponse parts", %{vertex_ai: vertex_ai} do
       data =
         ChatVertexAI.for_api(
@@ -1364,7 +1380,8 @@ defmodule ChatModels.ChatVertexAITest do
 
       messages = [Message.new_system!("sys"), Message.new_user!("hello world")]
 
-      assert {:ok, %ChatVertexAI{cached_content: "projects/proj/locations/us/cachedContents/abc123"}} =
+      assert {:ok,
+              %ChatVertexAI{cached_content: "projects/proj/locations/us/cachedContents/abc123"}} =
                ChatVertexAI.cache(model, [ttl: "300s"], messages, [])
 
       verify!()
