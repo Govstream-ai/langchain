@@ -1987,5 +1987,102 @@ defmodule ChatModels.ChatGoogleAITest do
       error = LangChainError.exception(type: "resource_exhausted", message: "Quota exceeded")
       refute ChatGoogleAI.retry_on_fallback?(error)
     end
+
+    test "streaming MALFORMED_FUNCTION_CALL candidate returns error instead of crashing" do
+      # When Gemini cannot form a valid function call, it returns a candidate
+      # without a "content" key, e.g.:
+      #
+      #   %{"finishMessage" => "Malformed function call: ...",
+      #     "finishReason" => "MALFORMED_FUNCTION_CALL",
+      #     "index" => 0}
+      #
+      # `do_process_response/3` falls through to the `_other` clause and emits
+      # an `{:error, %LangChainError{}}` for that candidate. This used to crash
+      # the streaming reduce in `do_api_request/3` with `KeyError` on `:index`.
+
+      candidate_error1 =
+        LangChainError.exception(
+          type: "unexpected_response",
+          message: "Unexpected response 1",
+          original: %{
+            "finishMessage" => "Malformed function call 1",
+            "finishReason" => "MALFORMED_FUNCTION_CALL",
+            "index" => 0
+          }
+        )
+
+      candidate_error2 =
+        LangChainError.exception(
+          type: "unexpected_response",
+          message: "Unexpected response 2",
+          original: %{
+            "finishMessage" => "Malformed function call 2",
+            "finishReason" => "MALFORMED_FUNCTION_CALL",
+            "index" => 0
+          }
+        )
+
+      delta1 = %LangChain.MessageDelta{
+        content: %LangChain.Message.ContentPart{type: :text, content: "Part 1"},
+        index: 0,
+        role: :assistant,
+        status: :incomplete
+      }
+
+      delta2 = %LangChain.MessageDelta{
+        content: %LangChain.Message.ContentPart{type: :text, content: "Part 2"},
+        index: 0,
+        role: :assistant,
+        status: :incomplete
+      }
+
+      model =
+        ChatGoogleAI.new!(%{
+          stream: true,
+          model: "gemini-2.5-flash"
+        })
+
+      expect(Req, :post, fn _req, _opts ->
+        {:ok,
+         %Req.Response{
+           status: 200,
+           headers: %{},
+           body: [
+             [delta1],
+             [{:error, candidate_error1}],
+             [delta2],
+             [{:error, candidate_error2}]
+           ]
+         }}
+      end)
+
+      # The call should return the first error it encounters
+      assert {:error, %LangChainError{} = error} =
+               ChatGoogleAI.call(model, [Message.new_user!("Hello")])
+
+      assert error.type == "unexpected_response"
+      assert error.message == "Unexpected response 1"
+      assert error.original["finishReason"] == "MALFORMED_FUNCTION_CALL"
+    end
+
+    test "streaming 200 with empty body returns empty_stream error instead of crashing" do
+      # `Req.Response.body` starts as the binary `""` and is converted to `[]`
+      # by `Utils.handle_stream_fn/3` only on the first `{:data, ...}` callback.
+      # If Gemini returns 200 with zero streamed chunks (e.g. immediate finish
+      # without content, or all chunks filtered by the SSE decoder), the body
+      # stays as the binary `""` and `List.flatten/1` crashes with a
+      # FunctionClauseError. This test guards that path.
+      expect(Req, :post, fn _req, _opts ->
+        {:ok, %Req.Response{status: 200, headers: [], body: ""}}
+      end)
+
+      model = ChatGoogleAI.new!(%{stream: true, model: "gemini-2.5-flash"})
+
+      assert {:error, %LangChainError{} = error} =
+               ChatGoogleAI.call(model, [Message.new_user!("Hello")])
+
+      assert error.type == "empty_stream"
+      assert error.message =~ "Empty streaming response"
+    end
   end
 end

@@ -861,7 +861,7 @@ defmodule LangChain.ChatModels.ChatOpenAIResponses do
         %{"type" => "input_image", "file_id" => part.content}
       else
         media_prefix =
-          case Keyword.get(part.options || [], :media, nil) do
+          case Keyword.get(part.options, :media, nil) do
             nil ->
               ""
 
@@ -969,7 +969,7 @@ defmodule LangChain.ChatModels.ChatOpenAIResponses do
     end)
   end
 
-  @spec do_api_request(t(), [Message.t()], ChatModel.tools(), integer()) ::
+  @spec do_api_request(t(), [Message.t()], ChatModel.tools(), integer() | nil) ::
           list() | struct() | {:error, LangChainError.t()}
   def do_api_request(openai, messages, tools, retry_count \\ nil)
 
@@ -1221,68 +1221,49 @@ defmodule LangChain.ChatModels.ChatOpenAIResponses do
 
   # Unlike the Chat Completions API, we do not get a [DONE] token at the end of the stream.
 
-  @spec decode_stream({String.t(), String.t()}) :: {%{String.t() => any()}}
-  def decode_stream({raw_data, buffer}, done \\ []) do
-    raw_data
-    |> String.split(~r/event: /)
-    |> Enum.map(fn
-      <<"event: ", rest::binary>> -> rest
-      other -> other
-    end)
-    |> Enum.flat_map(fn chunk ->
-      case String.split(chunk, ~r/\ndata: /, parts: 2) do
-        [_event, json] -> [json]
-        [json_only] -> [json_only]
-        _ -> []
-      end
-    end)
-    |> Enum.reduce({done, buffer}, fn str, {done, incomplete} = acc ->
-      str
-      |> String.trim()
-      |> case do
-        "" ->
-          acc
+  @spec decode_stream({String.t(), String.t()}) :: {[map()], String.t()}
+  def decode_stream({raw_data, buffer}) do
+    combined = buffer <> raw_data
 
-        json ->
-          parse_combined_data(incomplete, json, done)
-      end
-    end)
-  end
+    segments = String.split(combined, "\n\n")
 
-  defp parse_combined_data("", json, done) do
-    json
-    |> Jason.decode()
-    |> case do
-      {:ok, parsed} ->
-        {done ++ [parsed], ""}
+    {complete_segments, [maybe_incomplete]} = Enum.split(segments, -1)
 
-      {:error, _reason} ->
-        {done, json}
-    end
-  end
+    parsed =
+      complete_segments
+      |> Enum.flat_map(fn segment ->
+        segment
+        |> String.split("\n")
+        |> Enum.find_value(fn
+          "data: " <> json -> json
+          "data:" <> json -> String.trim_leading(json)
+          _ -> nil
+        end)
+        |> case do
+          nil ->
+            []
 
-  defp parse_combined_data(incomplete, json, done) do
-    # combine with any previous incomplete data
-    starting_json = incomplete <> json
+          json ->
+            case Jason.decode(json) do
+              {:ok, parsed} -> [parsed]
+              {:error, _} -> []
+            end
+        end
+      end)
 
-    # recursively call decode_stream so that the combined message data is split on "data: " again.
-    # the combined data may need re-splitting if the last message ended in the middle of the "data: " key.
-    # i.e. incomplete ends with "dat" and the new message starts with "a: {".
-    decode_stream({starting_json, ""}, done)
+    {parsed, maybe_incomplete}
   end
 
   # Parse a new message response
   @doc false
-  @spec do_process_response(
-          %{:callbacks => [map()]},
-          data :: %{String.t() => any()} | {:error, any()}
-        ) ::
+  @spec do_process_response(t(), data :: any()) ::
           :skip
+          | TokenUsage.t()
           | Message.t()
-          | [Message.t()]
+          | [Message.t() | MessageDelta.t() | TokenUsage.t() | {:error, LangChainError.t()}]
           | MessageDelta.t()
           | [MessageDelta.t()]
-          | {:error, String.t()}
+          | {:error, LangChainError.t()}
 
   # Complete Response with output lists
   def do_process_response(

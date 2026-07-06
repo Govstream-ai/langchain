@@ -589,6 +589,7 @@ defmodule LangChain.Chains.LLMChain do
           {:ok, t()}
           | {:ok, t(), term()}
           | {:pause, t()}
+          | {:interrupt, t(), term()}
           | {:error, t(), LangChainError.t()}
   def run(chain, opts \\ [])
 
@@ -668,13 +669,9 @@ defmodule LangChain.Chains.LLMChain do
   defp initial_run_logging(%LLMChain{verbose: false} = _chain), do: :ok
 
   defp initial_run_logging(%LLMChain{verbose: true} = chain) do
-    # set the callback function on the chain
-    if chain.verbose, do: IO.inspect(chain.llm, label: "LLM")
-
-    if chain.verbose, do: IO.inspect(chain.messages, label: "MESSAGES")
-
-    if chain.verbose, do: IO.inspect(chain.tools, label: "TOOLS")
-
+    IO.inspect(chain.llm, label: "LLM")
+    IO.inspect(chain.messages, label: "MESSAGES")
+    IO.inspect(chain.tools, label: "TOOLS")
     :ok
   end
 
@@ -949,6 +946,11 @@ defmodule LangChain.Chains.LLMChain do
                "This can happen with thinking/reasoning models during streaming."
          )}
 
+      {:ok, [[error: %LangChainError{} = reason] | _]} ->
+        if chain.verbose, do: IO.inspect(reason, label: "ERROR")
+        Logger.error("Error during chat call. Reason: #{inspect(reason)}")
+        {:error, chain, reason}
+
       {:ok, unexpected} ->
         Logger.warning("Unexpected LLM response format: #{inspect(unexpected)}")
 
@@ -956,6 +958,15 @@ defmodule LangChain.Chains.LLMChain do
          LangChainError.exception(
            type: "unexpected_response",
            message: "Unexpected response format from LLM: #{inspect(unexpected)}"
+         )}
+
+      {:error, reason} ->
+        Logger.error("Error during chat call. Reason: #{inspect(reason)}")
+
+        {:error, chain,
+         LangChainError.exception(
+           type: "unknown_error",
+           message: "LLM error: #{inspect(reason)}"
          )}
     end
   end
@@ -1419,6 +1430,9 @@ defmodule LangChain.Chains.LLMChain do
         grouped[:async]
         |> Enum.map(fn {call, func} ->
           Task.async(fn ->
+            # Fires inside the spawned Task so handlers (e.g. tenancy/OTel
+            # propagation) can re-apply per-process state before the tool runs.
+            Callbacks.fire(chain.callbacks, :on_tool_pre_execution, [chain, call, func])
             result = execute_tool_call(call, func, verbose: verbose, context: use_context)
             {call, func, result}
           end)
@@ -1449,6 +1463,7 @@ defmodule LangChain.Chains.LLMChain do
       # Execute sync tools with immediate callbacks
       sync_tool_results =
         Enum.map(grouped[:sync], fn {call, func} ->
+          Callbacks.fire(chain.callbacks, :on_tool_pre_execution, [chain, call, func])
           result = execute_tool_call(call, func, verbose: verbose, context: use_context)
 
           # Fire completed/failed callback immediately after execution
@@ -1479,7 +1494,12 @@ defmodule LangChain.Chains.LLMChain do
           # Fire failed callback for invalid tools
           Callbacks.fire(chain.callbacks, :on_tool_execution_failed, [chain, call, text])
 
-          ToolResult.new!(%{tool_call_id: call.call_id, content: text, is_error: true})
+          ToolResult.new!(%{
+            tool_call_id: call.call_id,
+            name: call.name,
+            content: text,
+            is_error: true
+          })
         end)
 
       combined_results = async_tool_results ++ sync_tool_results ++ invalid_calls
@@ -1573,6 +1593,12 @@ defmodule LangChain.Chains.LLMChain do
                   func
                 ])
 
+                Callbacks.fire(chain.callbacks, :on_tool_pre_execution, [
+                  chain,
+                  tool_call,
+                  func
+                ])
+
                 result =
                   execute_tool_call(tool_call, func, verbose: verbose, context: use_context)
 
@@ -1625,6 +1651,12 @@ defmodule LangChain.Chains.LLMChain do
 
                 # Fire started callback before execution
                 Callbacks.fire(chain.callbacks, :on_tool_execution_started, [
+                  chain,
+                  edited_call,
+                  func
+                ])
+
+                Callbacks.fire(chain.callbacks, :on_tool_pre_execution, [
                   chain,
                   edited_call,
                   func
@@ -1824,6 +1856,7 @@ defmodule LangChain.Chains.LLMChain do
 
           ToolResult.new!(%{
             tool_call_id: call.call_id,
+            name: function.name,
             content: "ERROR executing tool: #{inspect(err)}",
             is_error: true
           })

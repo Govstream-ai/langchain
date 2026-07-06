@@ -173,6 +173,95 @@ defmodule LangChain.TrajectoryTest do
     end
   end
 
+  describe "from_messages/2" do
+    test "builds a trajectory from a bare message list without an llm" do
+      tc = make_tool_call("search", %{"query" => "weather"})
+
+      messages = [
+        user_msg("What's the weather?"),
+        assistant_msg(nil, tool_calls: [tc])
+      ]
+
+      trajectory = Trajectory.from_messages(messages)
+
+      assert trajectory.messages == messages
+      assert [%{name: "search", arguments: %{"query" => "weather"}}] = trajectory.tool_calls
+      # No llm provided, so metadata is empty
+      assert trajectory.metadata == %{}
+    end
+
+    test "populates metadata when an llm is provided" do
+      {:ok, llm} = ChatOpenAI.new(%{temperature: 0})
+
+      messages = [user_msg("Hello"), assistant_msg("Hi")]
+      trajectory = Trajectory.from_messages(messages, llm)
+
+      assert trajectory.metadata.model == "gpt-3.5-turbo"
+      assert trajectory.metadata.llm_module == ChatOpenAI
+    end
+
+    test "aggregates token usage over a hand-built message list" do
+      usage1 = make_usage(10, 20)
+      usage2 = make_usage(5, 15)
+
+      messages = [
+        user_msg("Hello"),
+        assistant_msg("Hi", usage: usage1),
+        user_msg("More"),
+        assistant_msg("Sure", usage: usage2)
+      ]
+
+      trajectory = Trajectory.from_messages(messages)
+
+      assert trajectory.token_usage.input == 15
+      assert trajectory.token_usage.output == 35
+    end
+
+    test "is equivalent to from_chain/1 on the chain's exchanged_messages" do
+      tc1 = make_tool_call("search", %{"query" => "weather"})
+      tc2 = make_tool_call("get_forecast", %{"city" => "Paris"})
+      tr1 = make_tool_result("search", "Sunny")
+
+      messages = [
+        user_msg("What's the weather in Paris?"),
+        assistant_msg(nil, tool_calls: [tc1], usage: make_usage(10, 20)),
+        tool_msg([tr1]),
+        assistant_msg(nil, tool_calls: [tc2], usage: make_usage(5, 15))
+      ]
+
+      chain = chain_with_messages(messages)
+
+      from_chain = Trajectory.from_chain(chain)
+      from_messages = Trajectory.from_messages(chain.exchanged_messages, chain.llm)
+
+      assert from_chain == from_messages
+    end
+
+    test "a bare-list-without-llm trajectory still matches?/3 correctly" do
+      tc1 = make_tool_call("search", %{"query" => "weather"})
+      tc2 = make_tool_call("get_forecast", %{"city" => "Paris"})
+
+      messages = [
+        user_msg("What's the weather in Paris?"),
+        assistant_msg(nil, tool_calls: [tc1]),
+        assistant_msg(nil, tool_calls: [tc2])
+      ]
+
+      trajectory = Trajectory.from_messages(messages)
+
+      assert Trajectory.matches?(trajectory, [
+               %{name: "search", arguments: %{"query" => "weather"}},
+               %{name: "get_forecast", arguments: %{"city" => "Paris"}}
+             ])
+
+      assert Trajectory.matches?(trajectory, [%{name: "search", arguments: nil}], mode: :superset)
+
+      refute Trajectory.matches?(trajectory, [%{name: "delete_all", arguments: nil}],
+               mode: :superset
+             )
+    end
+  end
+
   describe "to_map/1" do
     test "serializes empty trajectory" do
       trajectory = %Trajectory{messages: [], tool_calls: [], token_usage: nil}
@@ -581,6 +670,134 @@ defmodule LangChain.TrajectoryTest do
     end
   end
 
+  describe "called_before?/3,4" do
+    setup do
+      trajectory = %Trajectory{
+        messages: [],
+        tool_calls: [
+          %{name: "search", arguments: %{"query" => "weather"}},
+          %{name: "summarize", arguments: nil},
+          %{name: "answer", arguments: nil}
+        ],
+        token_usage: nil
+      }
+
+      %{trajectory: trajectory}
+    end
+
+    test "true when A precedes B", %{trajectory: trajectory} do
+      assert Trajectory.called_before?(trajectory, "search", "answer")
+    end
+
+    test "false when A follows B", %{trajectory: trajectory} do
+      refute Trajectory.called_before?(trajectory, "answer", "search")
+    end
+
+    test "false when A is missing", %{trajectory: trajectory} do
+      refute Trajectory.called_before?(trajectory, "missing", "answer")
+    end
+
+    test "false when B is missing", %{trajectory: trajectory} do
+      refute Trajectory.called_before?(trajectory, "search", "missing")
+    end
+
+    test "false when both are missing", %{trajectory: trajectory} do
+      refute Trajectory.called_before?(trajectory, "nope", "nada")
+    end
+
+    test "false when A and B are the same single call", %{trajectory: trajectory} do
+      # A single call to a tool is not 'before' itself.
+      refute Trajectory.called_before?(trajectory, "answer", "answer")
+    end
+
+    test "uses min(index A) < max(index B): any A before any B" do
+      # Interleaved: search, answer, search, answer. min(search)=0, max(answer)=3.
+      trajectory = %Trajectory{
+        messages: [],
+        tool_calls: [
+          %{name: "search", arguments: nil},
+          %{name: "answer", arguments: nil},
+          %{name: "search", arguments: nil},
+          %{name: "answer", arguments: nil}
+        ],
+        token_usage: nil
+      }
+
+      assert Trajectory.called_before?(trajectory, "search", "answer")
+      # And the reverse: min(answer)=1 < max(search)=2, so this also holds.
+      assert Trajectory.called_before?(trajectory, "answer", "search")
+    end
+
+    test "repeated A and B where every B precedes every A" do
+      trajectory = %Trajectory{
+        messages: [],
+        tool_calls: [
+          %{name: "answer", arguments: nil},
+          %{name: "answer", arguments: nil},
+          %{name: "search", arguments: nil}
+        ],
+        token_usage: nil
+      }
+
+      # min(search)=2, max(answer)=1 -> 2 < 1 is false
+      refute Trajectory.called_before?(trajectory, "search", "answer")
+    end
+
+    test "accepts a bare list of tool calls" do
+      calls = [
+        %{name: "search", arguments: nil},
+        %{name: "answer", arguments: nil}
+      ]
+
+      assert Trajectory.called_before?(calls, "search", "answer")
+      refute Trajectory.called_before?(calls, "answer", "search")
+    end
+
+    test "accepts an LLMChain directly" do
+      tc1 = make_tool_call("search", %{"q" => "x"}, "call_1")
+      tc2 = make_tool_call("answer", nil, "call_2")
+      tr1 = make_tool_result("search", "result", "call_1")
+
+      messages = [
+        user_msg("go"),
+        assistant_msg(nil, tool_calls: [tc1]),
+        tool_msg([tr1]),
+        assistant_msg(nil, tool_calls: [tc2])
+      ]
+
+      chain = chain_with_messages(messages)
+
+      assert Trajectory.called_before?(chain, "search", "answer")
+    end
+
+    # :require_both — ensures a missing tool is detected rather than silently
+    # collapsing to false.
+    test "require_both raises when A was never called", %{trajectory: trajectory} do
+      assert_raise ArgumentError, ~r/"missing".*never called/, fn ->
+        Trajectory.called_before?(trajectory, "missing", "answer", require_both: true)
+      end
+    end
+
+    test "require_both raises when B was never called", %{trajectory: trajectory} do
+      assert_raise ArgumentError, ~r/"missing".*never called/, fn ->
+        Trajectory.called_before?(trajectory, "search", "missing", require_both: true)
+      end
+    end
+
+    test "require_both raises when both were never called", %{trajectory: trajectory} do
+      assert_raise ArgumentError, ~r/never called/, fn ->
+        Trajectory.called_before?(trajectory, "nope", "nada", require_both: true)
+      end
+    end
+
+    test "require_both does not raise when both present, returns ordering", %{
+      trajectory: trajectory
+    } do
+      assert Trajectory.called_before?(trajectory, "search", "answer", require_both: true)
+      refute Trajectory.called_before?(trajectory, "answer", "search", require_both: true)
+    end
+  end
+
   describe "calls_by_name/2" do
     test "returns matching tool calls" do
       trajectory = %Trajectory{
@@ -805,6 +1022,87 @@ defmodule LangChain.TrajectoryTest do
 
       assert_raise ExUnit.AssertionError, ~r/Unexpected trajectory match/, fn ->
         refute_trajectory(trajectory, [%{name: "search", arguments: nil}], mode: :superset)
+      end
+    end
+  end
+
+  describe "assert_called_before/3,4" do
+    setup do
+      trajectory = %Trajectory{
+        messages: [],
+        tool_calls: [
+          %{name: "search", arguments: nil},
+          %{name: "answer", arguments: nil}
+        ],
+        token_usage: nil
+      }
+
+      %{trajectory: trajectory}
+    end
+
+    test "passes when A precedes B", %{trajectory: trajectory} do
+      assert_called_before(trajectory, "search", "answer")
+    end
+
+    test "raises ExUnit.AssertionError when ordering does not hold", %{trajectory: trajectory} do
+      assert_raise ExUnit.AssertionError, ~r/before/, fn ->
+        assert_called_before(trajectory, "answer", "search")
+      end
+    end
+
+    test "accepts an LLMChain directly" do
+      tc1 = make_tool_call("search", nil, "call_1")
+      tc2 = make_tool_call("answer", nil, "call_2")
+
+      messages = [
+        user_msg("go"),
+        assistant_msg(nil, tool_calls: [tc1, tc2])
+      ]
+
+      chain = chain_with_messages(messages)
+      assert_called_before(chain, "search", "answer")
+    end
+
+    test "require_both surfaces a missing tool as a failure", %{trajectory: trajectory} do
+      assert_raise ArgumentError, ~r/never called/, fn ->
+        assert_called_before(trajectory, "search", "missing", require_both: true)
+      end
+    end
+  end
+
+  describe "refute_called_before/3,4" do
+    setup do
+      trajectory = %Trajectory{
+        messages: [],
+        tool_calls: [
+          %{name: "search", arguments: nil},
+          %{name: "answer", arguments: nil}
+        ],
+        token_usage: nil
+      }
+
+      %{trajectory: trajectory}
+    end
+
+    test "passes when ordering does not hold", %{trajectory: trajectory} do
+      refute_called_before(trajectory, "answer", "search")
+    end
+
+    test "passes when a tool is missing (default)", %{trajectory: trajectory} do
+      refute_called_before(trajectory, "search", "missing")
+    end
+
+    test "raises ExUnit.AssertionError when ordering unexpectedly holds", %{
+      trajectory: trajectory
+    } do
+      assert_raise ExUnit.AssertionError, ~r/before/, fn ->
+        refute_called_before(trajectory, "search", "answer")
+      end
+    end
+
+    test "require_both surfaces a missing tool instead of passing", %{trajectory: trajectory} do
+      assert_raise ArgumentError, ~r/never called/, fn ->
+        refute_called_before(trajectory, "search", "missing", require_both: true)
       end
     end
   end

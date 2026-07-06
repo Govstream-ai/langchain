@@ -2552,6 +2552,30 @@ defmodule LangChain.Chains.LLMChainTest do
       assert error.type == "unexpected_response"
     end
 
+    test "handles overloaded_error wrapped in :ok tuple", %{chain: chain} do
+      expect(ChatOpenAI, :call, fn _model, _messages, _tools ->
+        {:ok,
+         [[error: LangChainError.exception(type: "overloaded_error", message: "Overloaded")]]}
+      end)
+
+      chain = LLMChain.add_message(chain, Message.new_user!("Hi"))
+
+      assert {:error, _chain, %LangChainError{} = reason} = LLMChain.run(chain)
+      assert reason.type == "overloaded_error"
+      assert reason.message == "Overloaded"
+    end
+
+    test "handles non-standard error shapes gracefully", %{chain: chain} do
+      expect(ChatOpenAI, :call, fn _model, _messages, _tools ->
+        {:error, %{status: 500, body: "Internal Server Error"}}
+      end)
+
+      chain = LLMChain.add_message(chain, Message.new_user!("Hi"))
+
+      assert {:error, _chain, %LangChainError{} = reason} = LLMChain.run(chain)
+      assert reason.type == "unknown_error"
+    end
+
     test "does not loop infinitely when streaming tool call has malformed JSON (issue #443)" do
       # When an LLM returns truncated JSON in tool_call.arguments during streaming,
       # the chain should return an error rather than silently swallowing the failure.
@@ -3177,6 +3201,33 @@ defmodule LangChain.Chains.LLMChainTest do
       assert error.message == "Exceeded maximum number of runs (3/3)"
     end
 
+    # Regression: a successful tool call on the LLM call that hits the
+    # max_runs ceiling must terminate with success, not be discarded.
+    # Previously `check_max_runs` ran before `check_until_tool` and a
+    # max_runs=1 + first-call success path errored out instead of
+    # returning the tool result.
+    test "succeeds when the target tool is called on the same LLM call that hits max_runs",
+         %{greet: greet, sync: do_thing} do
+      expect(ChatOpenAI, :call, fn _model, _messages, _tools ->
+        {:ok,
+         new_function_calls!([
+           ToolCall.new!(%{call_id: "call_doThing", name: "do_thing", arguments: nil})
+         ])}
+      end)
+
+      {:ok, updated_chain, tool_result} =
+        %{llm: ChatOpenAI.new!(%{stream: false}), verbose: false}
+        |> LLMChain.new!()
+        |> LLMChain.add_tools([greet, do_thing])
+        |> LLMChain.add_message(Message.new_system!())
+        |> LLMChain.add_message(Message.new_user!("Call do_thing right away."))
+        |> LLMChain.run_until_tool_used("do_thing", max_runs: 1)
+
+      assert updated_chain.last_message.role == :tool
+      assert %ToolResult{is_error: false} = tool_result
+      assert tool_result.name == "do_thing"
+    end
+
     test "returns error when tool_name does not exist in available tools", %{greet: greet} do
       {:error, _updated_chain, error} =
         %{llm: ChatOpenAI.new!(%{stream: false}), verbose: false}
@@ -3445,6 +3496,114 @@ defmodule LangChain.Chains.LLMChainTest do
              ]
 
       assert result.is_error == true
+      assert result.name == "go_time"
+    end
+
+    test "outer rescue in execute_tool_call/2 produces a ToolResult tagged with the function name" do
+      # Function.execute/3 has its own inner rescue, so the outer rescue in
+      # execute_tool_call/2 only fires if Function.execute/3 itself raises.
+      # Stub it to raise so we exercise that defensive branch and verify the
+      # produced ToolResult carries the function's name
+      tool =
+        Function.new!(%{
+          name: "go_time",
+          description: "Tool that we'll cause to raise outside its inner rescue.",
+          function: fn _args, _context -> :unreachable end
+        })
+
+      Mimic.expect(Function, :execute, fn _function, _args, _context ->
+        raise RuntimeError, "boom outside inner rescue"
+      end)
+
+      chain =
+        LLMChain.new!(%{
+          llm: ChatOpenAI.new!(%{stream: false}),
+          custom_context: %{count: 1}
+        })
+        |> LLMChain.add_tools(tool)
+        |> LLMChain.add_message(Message.new_system!())
+        |> LLMChain.add_message(Message.new_user!("It's go time!"))
+        |> LLMChain.add_message(new_function_call!("call_fake123", "go_time", "{}"))
+
+      updated_chain = LLMChain.execute_tool_calls(chain)
+
+      assert updated_chain.last_message.role == :tool
+      [%ToolResult{} = result] = updated_chain.last_message.tool_results
+      assert result.tool_call_id == "call_fake123"
+      assert result.name == "go_time"
+      assert result.is_error == true
+
+      assert [%ContentPart{type: :text, content: text}] = result.content
+      assert text =~ "ERROR executing tool:"
+      assert text =~ "boom outside inner rescue"
+    end
+
+    test "parse_args rejection produces an error ToolResult and fires response callbacks" do
+      # When the optional :parse_args parser rejects the args, the function
+      # body must NOT run, but the tool-call must still produce a ToolResult
+      # and fire :on_tool_response_created so token usage, telemetry, and
+      # trajectory consumers can see that the tool call was attempted.
+      test_pid = self()
+      parent = self()
+
+      tool =
+        Function.new!(%{
+          name: "diagnose",
+          description: "Diagnose a thing.",
+          function: fn _args, _ctx ->
+            send(parent, :function_body_ran)
+            {:ok, "should not reach this"}
+          end,
+          parse_args: fn _args -> {:error, "device_task_id is required"} end
+        })
+
+      handler = %{
+        on_tool_response_created: fn _chain, tool_msg ->
+          send(test_pid, {:response_created_callback_fired, tool_msg})
+        end
+      }
+
+      :telemetry.attach(
+        "parse-args-telemetry-test",
+        [:langchain, :tool, :call, :stop],
+        fn _event, _measurements, metadata, _config ->
+          send(test_pid, {:telemetry_fired, metadata})
+        end,
+        nil
+      )
+
+      chain =
+        LLMChain.new!(%{
+          llm: ChatOpenAI.new!(%{stream: false}),
+          custom_context: %{count: 1}
+        })
+        |> LLMChain.add_tools(tool)
+        |> LLMChain.add_callback(handler)
+        |> LLMChain.add_message(Message.new_system!())
+        |> LLMChain.add_message(Message.new_user!("diagnose this"))
+        |> LLMChain.add_message(new_function_call!("call_parse_fail", "diagnose", "{}"))
+
+      updated_chain = LLMChain.execute_tool_calls(chain)
+
+      # Function body must not have run.
+      refute_received :function_body_ran
+
+      # The tool call still produced a tool-result message.
+      assert %Message{role: :tool} = result_message = updated_chain.last_message
+      assert [%ToolResult{} = result] = result_message.tool_results
+      assert result.tool_call_id == "call_parse_fail"
+      assert result.is_error == true
+      assert result.content == [ContentPart.text!("device_task_id is required")]
+
+      # :on_tool_response_created fired with the error result so downstream
+      # observers see the attempted call.
+      assert_receive {:response_created_callback_fired, %Message{role: :tool} = callback_msg}
+      assert [%ToolResult{is_error: true}] = callback_msg.tool_results
+
+      # The tool-call telemetry span still fired — observability is preserved.
+      assert_receive {:telemetry_fired, %{tool_name: "diagnose", tool_call_id: "call_parse_fail"}}
+
+      :telemetry.detach("parse-args-telemetry-test")
     end
 
     test "returns error tool result when tool_call is a hallucination" do
@@ -3469,6 +3628,8 @@ defmodule LangChain.Chains.LLMChainTest do
       assert result.content == [ContentPart.text!("Tool call made to greet but tool not found")]
       # tool response is linked to original call
       assert result.tool_call_id == "call_fake123"
+      # name is preserved from the original tool call
+      assert result.name == "greet"
       assert result.is_error == true
     end
 

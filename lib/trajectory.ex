@@ -28,6 +28,11 @@ defmodule LangChain.Trajectory do
 
       trajectory = Trajectory.from_chain(chain)
 
+      # Or build from a bare message list when no live chain is available
+      # (e.g. a persisted agent state). The llm is optional and only feeds
+      # metadata.
+      trajectory = Trajectory.from_messages(messages, llm)
+
       # Serialize for logging or golden-file comparison
       map = Trajectory.to_map(trajectory)
 
@@ -39,6 +44,9 @@ defmodule LangChain.Trajectory do
         %{name: "search", arguments: %{"query" => "weather"}},
         %{name: "get_forecast", arguments: nil}
       ])
+
+      # Assert relative ordering: search happened before answer
+      Trajectory.called_before?(trajectory, "search", "answer")
 
       # Filter tool calls by name
       Trajectory.calls_by_name(trajectory, "search")
@@ -170,16 +178,45 @@ defmodule LangChain.Trajectory do
       trajectory = Trajectory.from_chain(chain)
   """
   @spec from_chain(LLMChain.t()) :: t()
-  def from_chain(%LLMChain{exchanged_messages: messages, llm: llm}) do
-    tool_calls = extract_tool_calls(messages)
-    token_usage = aggregate_token_usage(messages)
-    metadata = extract_metadata(llm)
+  def from_chain(%LLMChain{exchanged_messages: exchanged_messages, llm: llm}) do
+    from_messages(exchanged_messages, llm)
+  end
 
+  @doc """
+  Build a `Trajectory` from a list of exchanged messages.
+
+  Use this when you have the messages from an assistant operation, workflow,
+  or set of tool-call iterations but do **not** have a live `LLMChain` — for
+  example, a persisted agent state or a sliced "last turn" of a conversation.
+
+  The `messages` argument should be the **exchanged messages for the operation
+  you want to analyze**, not necessarily an entire conversation. Including the
+  leading system/user preamble is harmless for tool-call extraction and
+  matching (those messages carry no tool calls), but for token aggregation and
+  `calls_by_turn/1` semantics you generally want just the turns produced during
+  the operation under analysis.
+
+  `llm` is optional and is only used to populate `metadata` (`:model` and
+  `:llm_module`). Pass `nil` (the default) to produce an empty metadata map.
+  Note that metadata does not survive a JSON roundtrip anyway (see the
+  `from_map/1` note), so it is safe to omit when you only have a stored
+  message list.
+
+  ## Example
+
+      # From a persisted agent state, analyzing the whole conversation:
+      trajectory = Trajectory.from_messages(state.messages, agent.model)
+
+      # From a pre-sliced "last turn" with no llm handy:
+      trajectory = Trajectory.from_messages(last_turn_messages)
+  """
+  @spec from_messages([Message.t()], struct() | nil) :: t()
+  def from_messages(messages, llm \\ nil) when is_list(messages) do
     %Trajectory{
       messages: messages,
-      tool_calls: tool_calls,
-      token_usage: token_usage,
-      metadata: metadata
+      tool_calls: extract_tool_calls(messages),
+      token_usage: aggregate_token_usage(messages),
+      metadata: extract_metadata(llm)
     }
   end
 
@@ -306,6 +343,76 @@ defmodule LangChain.Trajectory do
   end
 
   @doc """
+  Return `true` when tool `name_a` was called before tool `name_b`.
+
+  This asserts *relative ordering* of two tool calls regardless of how many
+  other calls happen in between — the common middle ground between `:superset`
+  (containment, order-independent) and `:strict` (whole sequence, exact count).
+  It answers "did the agent call `search` at some point before it called
+  `answer`?".
+
+  `trajectory` can be a `Trajectory` struct, an `LLMChain`, or a bare list of
+  `%{name: ..., arguments: ...}` tool call maps.
+
+  ## Semantics
+
+  Ordering is evaluated over the flat, ordered `tool_calls` list (the same
+  order `calls_by_turn/1` exposes). Calls emitted in the same assistant message
+  are ordered by their position in that list.
+
+  Returns `true` when *any* `name_a` call precedes *any* `name_b` call — i.e.
+  `min(index of name_a) < max(index of name_b)`. This matches the natural
+  reading of "A happened before B" and tolerates interleaving.
+
+  ## Missing tools
+
+  By default, if either tool was never called this returns `false` (so
+  `refute_called_before` passes vacuously). Pass `require_both: true` to instead
+  raise an `ArgumentError` when either tool is absent — use this when a missing
+  tool indicates a broken eval and should be surfaced rather than silently
+  collapsing to `false`.
+
+  ## Options
+
+    * `:require_both` — when `true`, raise `ArgumentError` if either tool was
+      never called (default `false`)
+
+  ## Examples
+
+      Trajectory.called_before?(trajectory, "search", "answer")
+      #=> true
+
+      # Detect a missing tool instead of passing silently
+      Trajectory.called_before?(trajectory, "search", "answer", require_both: true)
+  """
+  @spec called_before?(t() | LLMChain.t() | [tool_call_map()], String.t(), String.t(), keyword()) ::
+          boolean()
+  def called_before?(trajectory, name_a, name_b, opts \\ [])
+
+  def called_before?(%LLMChain{} = chain, name_a, name_b, opts) do
+    called_before?(from_chain(chain), name_a, name_b, opts)
+  end
+
+  def called_before?(%Trajectory{tool_calls: calls}, name_a, name_b, opts) do
+    called_before?(calls, name_a, name_b, opts)
+  end
+
+  def called_before?(calls, name_a, name_b, opts) when is_list(calls) do
+    first_a = Enum.find_index(calls, &(&1.name == name_a))
+    last_b = find_last_index(calls, &(&1.name == name_b))
+
+    if Keyword.get(opts, :require_both, false) do
+      ensure_both_present!(name_a, first_a, name_b, last_b)
+    end
+
+    case {first_a, last_b} do
+      {nil, _} -> false
+      {_, nil} -> false
+      {ia, ib} -> ia < ib
+    end
+  end
+
+  @doc """
   Return all tool calls matching the given tool `name`.
 
   ## Example
@@ -347,6 +454,29 @@ defmodule LangChain.Trajectory do
   end
 
   # --- Private helpers ---
+
+  # Last index in `list` for which `fun` returns true, or nil. Mirrors
+  # Enum.find_index/2 but scanning from the right, used for max(index of B).
+  defp find_last_index(list, fun) do
+    list
+    |> Enum.with_index()
+    |> Enum.reduce(nil, fn {item, idx}, acc -> if fun.(item), do: idx, else: acc end)
+  end
+
+  defp ensure_both_present!(name_a, first_a, name_b, last_b) do
+    missing =
+      cond do
+        is_nil(first_a) and is_nil(last_b) -> "#{inspect(name_a)} and #{inspect(name_b)} were"
+        is_nil(first_a) -> "#{inspect(name_a)} was"
+        is_nil(last_b) -> "#{inspect(name_b)} was"
+        true -> nil
+      end
+
+    if missing do
+      raise ArgumentError,
+            ":require_both is set but #{missing} never called in the trajectory"
+    end
+  end
 
   defp extract_metadata(llm) when is_struct(llm) do
     %{
