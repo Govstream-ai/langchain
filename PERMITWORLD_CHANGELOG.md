@@ -28,6 +28,29 @@ set of divergences, not a history).
     contributing upstream.
 - Files: `lib/chat_models/chat_google_ai.ex`, `test/chat_models/chat_google_ai_test.exs`
 
+## Gemini Vertex serialization — `ChatVertexAI`
+
+- **Keep `functionResponse.response` an object.** A tool result decoding to a
+  top-level JSON array/scalar was assigned straight into `response`, which Vertex
+  rejects (`400 INVALID_ARGUMENT` — "Proto field is not repeating, cannot start
+  list"). permitworld's GIS tools return arrays (`[{"features": ...}]`), so every
+  tool-using Gemini agent failed on the tool-result turn.
+  `tool_result_response_for_api/1` now wraps non-map values as
+  `%{"result" => data}`. (`7e5a35c`)
+- **Serialize inline `:file` content parts.** `for_api/1` had no `:file` clause,
+  so an inline document (a PDF uploaded for the DocumentClassifier) raised
+  `FunctionClauseError` before the request was built. Added the clause emitting
+  Vertex's camelCase `inlineData`/`mimeType`, plus a `file_mime_type/1` helper
+  accepting the `:pdf`/`:csv` atoms and raw MIME strings — the Vertex mirror of
+  the `ChatGoogleAI` `:file` clause above. (`130cce1`)
+  - _Upstream disposition:_ the array-response fix is a genuine upstream defect
+    (regression from brainlid/langchain#491, which dropped the object wrapper
+    `ChatGoogleAI` still carries) — contribute as-is. The `:file` clause is
+    upstreamable for atom `:media`, but its raw-MIME-string acceptance carries
+    the same `attachment.mimetype` coupling noted above — normalize before
+    contributing.
+- Files: `lib/chat_models/chat_vertex_ai.ex`, `test/chat_models/chat_vertex_ai_test.exs`
+
 ## Gemini context caching — `ChatGoogleAI` + `LLMChain`
 
 - `LLMChain.cache/1` → `ChatGoogleAI.cache/3`: creates a Gemini cached-content
