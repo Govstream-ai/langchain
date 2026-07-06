@@ -307,6 +307,19 @@ defmodule LangChain.ChatModels.ChatVertexAI do
     }
   end
 
+  # Inline document data (e.g. a PDF uploaded for the DocumentClassifier).
+  # ChatGoogleAI has an equivalent clause; Vertex was missing it, so a :file
+  # part hit no clause and raised FunctionClauseError. Vertex uses camelCase
+  # inlineData/mimeType (unlike AI Studio's inline_data/mime_type).
+  defp for_api(%ContentPart{type: :file} = part) do
+    %{
+      "inlineData" => %{
+        "mimeType" => file_mime_type(Keyword.get(part.options || [], :media)),
+        "data" => part.content
+      }
+    }
+  end
+
   defp for_api(%ToolCall{metadata: %{thought_signature: signature}} = call)
        when is_binary(signature) do
     %{
@@ -349,6 +362,16 @@ defmodule LangChain.ChatModels.ChatVertexAI do
   end
 
   defp for_api(nil), do: nil
+
+  # Resolve a ContentPart :media option to a MIME string. Accepts the atom
+  # shorthands and, as permitworld callers do, a raw MIME string verbatim.
+  defp file_mime_type(:pdf), do: "application/pdf"
+  defp file_mime_type(:csv), do: "text/csv"
+  defp file_mime_type(mime) when is_binary(mime), do: mime
+
+  defp file_mime_type(other) do
+    raise LangChainError, "Received unsupported media type for ContentPart: #{inspect(other)}"
+  end
 
   defp maybe_add_function_response_parts(
          %{"functionResponse" => function_response} = data,

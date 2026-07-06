@@ -305,6 +305,32 @@ defmodule ChatModels.ChatVertexAITest do
              } = tool_result
     end
 
+    test "serializes an inline file content part as inlineData", %{vertex_ai: vertex_ai} do
+      # A PDF uploaded for the DocumentClassifier arrives as a :file part with
+      # the raw mimetype string. Vertex was missing this clause entirely, so
+      # the part raised FunctionClauseError before the request was built.
+      data =
+        ChatVertexAI.for_api(
+          vertex_ai,
+          [
+            Message.new_user!([
+              ContentPart.text!("Classify this document"),
+              ContentPart.file!("base64-pdf-data", media: "application/pdf")
+            ])
+          ],
+          []
+        )
+
+      assert %{"contents" => [%{"role" => :user, "parts" => parts}]} = data
+
+      assert %{
+               "inlineData" => %{
+                 "mimeType" => "application/pdf",
+                 "data" => "base64-pdf-data"
+               }
+             } in parts
+    end
+
     test "preserves media as nested functionResponse parts", %{vertex_ai: vertex_ai} do
       data =
         ChatVertexAI.for_api(
