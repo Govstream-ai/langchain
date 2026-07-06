@@ -270,6 +270,41 @@ defmodule ChatModels.ChatVertexAITest do
              } = tool_result
     end
 
+    test "wraps array tool results so functionResponse.response stays an object",
+         %{vertex_ai: vertex_ai} do
+      # Vertex rejects a JSON array as functionResponse.response ("Proto field
+      # is not repeating"). Tools like the GIS map servers return a top-level
+      # array, so the serializer must wrap it in an object.
+      array_result = [%{"features" => [], "layer_name" => "Parcels"}]
+
+      data =
+        ChatVertexAI.for_api(
+          vertex_ai,
+          [
+            Message.new_tool_result!(%{
+              tool_results: [
+                ToolResult.new!(%{
+                  tool_call_id: "call_123",
+                  name: "query_parcels",
+                  content: Jason.encode!(array_result)
+                })
+              ]
+            })
+          ],
+          []
+        )
+
+      assert %{"contents" => [msg]} = data
+      assert %{"role" => :function, "parts" => [tool_result]} = msg
+
+      assert %{
+               "functionResponse" => %{
+                 "name" => "query_parcels",
+                 "response" => %{"result" => ^array_result}
+               }
+             } = tool_result
+    end
+
     test "preserves media as nested functionResponse parts", %{vertex_ai: vertex_ai} do
       data =
         ChatVertexAI.for_api(

@@ -362,13 +362,7 @@ defmodule LangChain.ChatModels.ChatVertexAI do
   defp tool_result_response_for_api(nil), do: %{}
 
   defp tool_result_response_for_api(content) when is_binary(content) do
-    case Jason.decode(content) do
-      {:ok, data} ->
-        data
-
-      {:error, %Jason.DecodeError{}} ->
-        %{"result" => content}
-    end
+    decode_tool_result_response(content)
   end
 
   defp tool_result_response_for_api(content_parts) when is_list(content_parts) do
@@ -379,13 +373,20 @@ defmodule LangChain.ChatModels.ChatVertexAI do
         %{}
 
       text_content ->
-        case Jason.decode(text_content) do
-          {:ok, data} ->
-            data
+        decode_tool_result_response(text_content)
+    end
+  end
 
-          {:error, %Jason.DecodeError{}} ->
-            %{"result" => text_content}
-        end
+  # Vertex requires functionResponse.response to be a Struct (JSON object). A
+  # tool may return a JSON array or scalar (e.g. GIS tools return a top-level
+  # array), which decodes to a non-map — wrap those so the proto stays valid.
+  # (The AI Studio endpoint tolerates this; Vertex 400s with "Proto field is
+  # not repeating, cannot start list".)
+  defp decode_tool_result_response(text) do
+    case Jason.decode(text) do
+      {:ok, data} when is_map(data) -> data
+      {:ok, data} -> %{"result" => data}
+      {:error, %Jason.DecodeError{}} -> %{"result" => text}
     end
   end
 
