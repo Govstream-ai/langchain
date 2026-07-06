@@ -1327,4 +1327,92 @@ defmodule ChatModels.ChatVertexAITest do
       verify!()
     end
   end
+
+  describe "cache/4" do
+    setup do
+      model =
+        ChatVertexAI.new!(%{
+          endpoint:
+            "https://aiplatform.us.rep.googleapis.com/v1/projects/proj/locations/us/publishers/google",
+          model: @test_model,
+          receive_timeout: 30_000
+        })
+
+      %{model: model}
+    end
+
+    test "posts to the location-level cachedContents URL with the full model ref", %{model: model} do
+      expect(Req, :post, fn req_struct ->
+        # cachedContents lives one level above publishers/google, same host.
+        assert URI.to_string(req_struct.url) ==
+                 "https://aiplatform.us.rep.googleapis.com/v1/projects/proj/locations/us/cachedContents"
+
+        body = req_struct.options[:json]
+
+        assert body["model"] ==
+                 "projects/proj/locations/us/publishers/google/models/#{@test_model}"
+
+        assert body["ttl"] == "300s"
+        assert [%{"role" => _, "parts" => _} | _] = body["contents"]
+
+        {:ok,
+         %Req.Response{
+           status: 200,
+           body: %{"name" => "projects/proj/locations/us/cachedContents/abc123"}
+         }}
+      end)
+
+      messages = [Message.new_system!("sys"), Message.new_user!("hello world")]
+
+      assert {:ok, %ChatVertexAI{cached_content: "projects/proj/locations/us/cachedContents/abc123"}} =
+               ChatVertexAI.cache(model, [ttl: "300s"], messages, [])
+
+      verify!()
+    end
+
+    test "returns :noop when content is below the minimum cacheable size", %{model: model} do
+      expect(Req, :post, fn _req_struct ->
+        {:ok,
+         %Req.Response{
+           status: 400,
+           body: %{
+             "error" => %{
+               "message" =>
+                 "The cached content is of 1020 tokens. The minimum token count to start caching is 1024."
+             }
+           }
+         }}
+      end)
+
+      messages = [Message.new_user!("tiny")]
+      assert {:ok, :noop} = ChatVertexAI.cache(model, [], messages, [])
+      verify!()
+    end
+
+    test "surfaces other 400s as errors rather than swallowing them", %{model: model} do
+      expect(Req, :post, fn _req_struct ->
+        {:ok,
+         %Req.Response{
+           status: 400,
+           body: %{"error" => %{"message" => "Invalid model reference."}}
+         }}
+      end)
+
+      messages = [Message.new_user!("hello world")]
+      assert {:error, %Req.Response{status: 400}} = ChatVertexAI.cache(model, [], messages, [])
+      verify!()
+    end
+
+    test "for_api sends cachedContent and omits system/tools once cached", %{model: model} do
+      # After a successful cache, LLMChain blanks messages/tools; the request then
+      # carries only the new turn plus the cachedContent handle.
+      cached = %{model | cached_content: "projects/proj/locations/us/cachedContents/abc123"}
+
+      data = ChatVertexAI.for_api(cached, [Message.new_user!("follow-up question")], [])
+
+      assert data["cachedContent"] == "projects/proj/locations/us/cachedContents/abc123"
+      refute Map.has_key?(data, "system_instruction")
+      refute Map.has_key?(data, "tools")
+    end
+  end
 end

@@ -106,6 +106,11 @@ defmodule LangChain.ChatModels.ChatVertexAI do
     field :json_schema, :map, default: nil
     field :stream, :boolean, default: false
 
+    # Handle of a Gemini cached-content entry (set by `cache/4`). When present it
+    # is sent as `cachedContent` and the already-cached messages/tools are not
+    # resent. Format: projects/P/locations/L/cachedContents/ID.
+    field :cached_content, :string, default: nil
+
     # A list of maps for callback handlers (treated as internal)
     field :callbacks, {:array, :map}, default: []
 
@@ -132,6 +137,7 @@ defmodule LangChain.ChatModels.ChatVertexAI do
     :json_response,
     :json_schema,
     :stream,
+    :cached_content,
     :req_config
   ]
   @required_fields [
@@ -209,6 +215,10 @@ defmodule LangChain.ChatModels.ChatVertexAI do
         "generationConfig" => generation_config_params
       }
       |> Utils.conditionally_add_to_map("system_instruction", for_api(sys_instructions))
+      # When content is cached, `cachedContent` carries the system instruction and
+      # tools; Vertex rejects re-sending them, but `cache/4` blanks them on the
+      # chain, so nothing to guard against here.
+      |> Utils.conditionally_add_to_map("cachedContent", vertex_ai.cached_content)
 
     if functions && not Enum.empty?(functions) do
       req
@@ -658,6 +668,78 @@ defmodule LangChain.ChatModels.ChatVertexAI do
   @spec get_action(t()) :: String.t()
   defp get_action(%ChatVertexAI{stream: false}), do: "generateContent"
   defp get_action(%ChatVertexAI{stream: true}), do: "streamGenerateContent"
+
+  @doc """
+  Create a Gemini context-cache entry for the given messages/tools and return the
+  model updated with its `cached_content` handle. Called by `LLMChain.cache/2`.
+
+  The Vertex `cachedContents` resource lives at the location level (not under
+  `publishers/google`), so the URL is derived from `:endpoint`. Mirrors
+  `ChatGoogleAI.cache/4` but uses the OAuth bearer token and Vertex's
+  below-minimum error wording. Content under the model's minimum cacheable token
+  count (2,048 for gemini-2.5-pro, 1,024 for 2.5-flash) yields `{:ok, :noop}`, so
+  the caller runs uncached rather than failing.
+  """
+  @spec cache(t(), keyword(), [Message.t()], [Function.t()]) ::
+          {:ok, t()} | {:ok, :noop} | {:error, any()}
+  def cache(%ChatVertexAI{} = vertex_ai, cache_opts, messages, tools) do
+    ttl = Keyword.get(cache_opts, :ttl, nil)
+
+    body =
+      for_api(vertex_ai, messages, tools)
+      |> Map.take(["contents", "system_instruction", "tools"])
+      |> Map.put("model", cache_model_ref(vertex_ai))
+      |> Utils.conditionally_add_to_map("ttl", ttl)
+
+    Req.new(
+      url: build_cache_url(vertex_ai),
+      json: body,
+      receive_timeout: vertex_ai.receive_timeout,
+      retry: :transient,
+      max_retries: 3,
+      retry_delay: fn attempt -> 300 * attempt end,
+      auth: {:bearer, get_api_key(vertex_ai)}
+    )
+    |> Req.merge(vertex_ai.req_config |> Keyword.new())
+    |> Req.post()
+    |> case do
+      {:ok, %Req.Response{status: 400, body: %{"error" => %{"message" => message}}} = resp} ->
+        # Vertex: "The cached content is of N tokens. The minimum token count to
+        # start caching is M." Below the minimum, run uncached instead of failing.
+        if String.contains?(message, "minimum token count to start caching") do
+          {:ok, :noop}
+        else
+          {:error, resp}
+        end
+
+      {:ok, %Req.Response{status: 200, body: %{"name" => cache_name}}} ->
+        {:ok, %{vertex_ai | cached_content: cache_name}}
+
+      {:ok, error} ->
+        {:error, error}
+
+      {:error, error} ->
+        {:error, error}
+    end
+  end
+
+  # `cachedContents` sits at .../locations/L/cachedContents — one level above the
+  # publisher path that generateContent uses. Strip the publisher suffix from the
+  # endpoint so the host (regional vs `us`/`eu` multi-region) is preserved.
+  @spec build_cache_url(t()) :: String.t()
+  defp build_cache_url(%ChatVertexAI{endpoint: endpoint}) do
+    base = String.replace_suffix(endpoint, "/publishers/google", "")
+    "#{base}/cachedContents"
+  end
+
+  # The cache body's `model` is the full resource path, e.g.
+  # projects/P/locations/L/publishers/google/models/MODEL — the endpoint's
+  # post-`/v1/` path plus the model.
+  @spec cache_model_ref(t()) :: String.t()
+  defp cache_model_ref(%ChatVertexAI{endpoint: endpoint, model: model}) do
+    path = endpoint |> String.split("/v1/", parts: 2) |> List.last()
+    "#{path}/models/#{model}"
+  end
 
   def complete_final_delta(data) when is_list(data) do
     update_in(data, [Access.at(-1), Access.at(-1)], &%{&1 | status: :complete})

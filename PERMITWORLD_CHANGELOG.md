@@ -49,6 +49,17 @@ set of divergences, not a history).
     upstreamable for atom `:media`, but its raw-MIME-string acceptance carries
     the same `attachment.mimetype` coupling noted above — normalize before
     contributing.
+- **Gemini context caching (`cache/4` + `cached_content`).** `ChatVertexAI` had
+  no `cache/4`, so `LLMChain.cache/2` — used by `AskDocumentQuestionsTool` to
+  cache an uploaded document across questions — crashed with `:undef` on Vertex
+  (the caching feature above was `ChatGoogleAI`-only). Added a `cached_content`
+  field, threaded it as `cachedContent` on requests, and implemented `cache/4`
+  against Vertex's `cachedContents` endpoint (derived from `:endpoint`; OAuth
+  bearer; `model` as the full `projects/.../publishers/google/models/MODEL`
+  resource). Below-minimum content (2,048 tokens for 2.5-pro) returns
+  `{:ok, :noop}` so callers run uncached.
+  - _Upstream disposition:_ candidate to contribute upstream — the Vertex twin
+    of the `ChatGoogleAI` caching feature, no permitworld coupling.
 - Files: `lib/chat_models/chat_vertex_ai.ex`, `test/chat_models/chat_vertex_ai_test.exs`
 
 ## Gemini context caching — `ChatGoogleAI` + `LLMChain`
