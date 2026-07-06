@@ -1299,6 +1299,51 @@ defmodule ChatModels.ChatVertexAITest do
     end
   end
 
+  describe "build_url" do
+    test "omits the OAuth token from the URL and authenticates via bearer header" do
+      expect(Req, :post, fn req_struct ->
+        # The token must not leak into the URL; it rides the Authorization header.
+        url = URI.to_string(req_struct.url)
+        refute url =~ "key="
+        assert url == "http://localhost:1234/models/#{@test_model}:generateContent"
+        assert req_struct.options[:auth] == {:bearer, "secret-oauth-token"}
+
+        {:error, RuntimeError.exception("stop here")}
+      end)
+
+      model =
+        ChatVertexAI.new!(%{
+          endpoint: "http://localhost:1234",
+          model: @test_model,
+          api_key: "secret-oauth-token"
+        })
+
+      assert {:error, _} = ChatVertexAI.call(model, "prompt", [])
+      verify!()
+    end
+
+    test "uses ?alt=sse (not &alt=sse) for the streaming URL" do
+      expect(Req, :post, fn req_struct, _opts ->
+        url = URI.to_string(req_struct.url)
+        refute url =~ "key="
+        assert url == "http://localhost:1234/models/#{@test_model}:streamGenerateContent?alt=sse"
+
+        {:error, RuntimeError.exception("stop here")}
+      end)
+
+      model =
+        ChatVertexAI.new!(%{
+          endpoint: "http://localhost:1234",
+          model: @test_model,
+          stream: true,
+          api_key: "secret-oauth-token"
+        })
+
+      assert {:error, _} = ChatVertexAI.call(model, "prompt", [])
+      verify!()
+    end
+  end
+
   describe "req_config" do
     test "merges req_config into the request (non-streaming)" do
       expect(Req, :post, fn req_struct ->

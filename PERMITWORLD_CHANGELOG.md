@@ -41,12 +41,19 @@ set of divergences, not a history).
   `cachedContents` endpoint (derived from `:endpoint`, OAuth bearer);
   under-minimum payloads return `{:ok, :noop}` and run uncached.
   (`1386c08`, `eaab2cf`)
-  - _Upstream disposition:_ the array-response fix is a genuine upstream defect
-    (regression from brainlid/langchain#491) — contribute as-is. The `:file`
-    clause and `cache/4` are the Vertex twins of `ChatGoogleAI` features; caching
-    has no permitworld coupling, but the `:file` clause's raw-MIME-string
-    acceptance carries the same `attachment.mimetype` coupling as the
-    `ChatGoogleAI` entry above — normalize before contributing.
+- Drop the `?key=` query param from `build_url/1`. It's an AI Studio holdover:
+  on Vertex, auth is the OAuth bearer token, and `get_api_key/1` was also
+  interpolating that token into the request URL (leaking it to logs/proxies/
+  telemetry) while contributing nothing. Streaming now uses `?alt=sse` instead
+  of `&alt=sse`.
+  - _Upstream disposition:_ the array-response and `?key=` fixes are genuine
+    upstream defects — the array fix a regression from brainlid/langchain#491,
+    the `?key=` leak present since `ChatVertexAI` was added; contribute both
+    as-is. The `:file` clause and `cache/4` are the Vertex twins of
+    `ChatGoogleAI` features; caching has no permitworld coupling, but the
+    `:file` clause's raw-MIME-string acceptance carries the same
+    `attachment.mimetype` coupling as the `ChatGoogleAI` entry above — normalize
+    before contributing.
 - Files: `lib/chat_models/chat_vertex_ai.ex`, `test/chat_models/chat_vertex_ai_test.exs`
 
 ## Gemini context caching — `ChatGoogleAI` + `LLMChain`

@@ -657,12 +657,16 @@ defmodule LangChain.ChatModels.ChatVertexAI do
 
   @spec build_url(t()) :: String.t()
   defp build_url(%ChatVertexAI{endpoint: endpoint, model: model} = vertex_ai) do
-    "#{endpoint}/models/#{model}:#{get_action(vertex_ai)}?key=#{get_api_key(vertex_ai)}"
+    # Auth is the OAuth bearer token (set on the request). The legacy `?key=`
+    # query param is an AI Studio holdover — on Vertex it duplicated the bearer
+    # token into the URL (logs/proxies/telemetry) while doing nothing, so it's
+    # dropped here.
+    "#{endpoint}/models/#{model}:#{get_action(vertex_ai)}"
     |> use_sse(vertex_ai)
   end
 
   @spec use_sse(String.t(), t()) :: String.t()
-  defp use_sse(url, %ChatVertexAI{stream: true}), do: url <> "&alt=sse"
+  defp use_sse(url, %ChatVertexAI{stream: true}), do: url <> "?alt=sse"
   defp use_sse(url, _model), do: url
 
   @spec get_action(t()) :: String.t()
