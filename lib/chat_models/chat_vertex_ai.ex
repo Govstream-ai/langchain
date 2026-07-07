@@ -137,7 +137,6 @@ defmodule LangChain.ChatModels.ChatVertexAI do
     :json_response,
     :json_schema,
     :stream,
-    :cached_content,
     :req_config
   ]
   @required_fields [
