@@ -270,6 +270,83 @@ defmodule ChatModels.ChatVertexAITest do
              } = tool_result
     end
 
+    test "wraps array tool results so functionResponse.response stays an object",
+         %{vertex_ai: vertex_ai} do
+      # Vertex rejects a JSON array as functionResponse.response ("Proto field
+      # is not repeating"). Tools like the GIS map servers return a top-level
+      # array, so the serializer must wrap it in an object.
+      array_result = [%{"features" => [], "layer_name" => "Parcels"}]
+
+      data =
+        ChatVertexAI.for_api(
+          vertex_ai,
+          [
+            Message.new_tool_result!(%{
+              tool_results: [
+                ToolResult.new!(%{
+                  tool_call_id: "call_123",
+                  name: "query_parcels",
+                  content: Jason.encode!(array_result)
+                })
+              ]
+            })
+          ],
+          []
+        )
+
+      assert %{"contents" => [msg]} = data
+      assert %{"role" => :function, "parts" => [tool_result]} = msg
+
+      assert %{
+               "functionResponse" => %{
+                 "name" => "query_parcels",
+                 "response" => %{"result" => ^array_result}
+               }
+             } = tool_result
+    end
+
+    test "serializes an inline file content part as inlineData", %{vertex_ai: vertex_ai} do
+      # A PDF uploaded for the DocumentClassifier arrives as a :file part with
+      # the raw mimetype string. Vertex was missing this clause entirely, so
+      # the part raised FunctionClauseError before the request was built.
+      data =
+        ChatVertexAI.for_api(
+          vertex_ai,
+          [
+            Message.new_user!([
+              ContentPart.text!("Classify this document"),
+              ContentPart.file!("base64-pdf-data", media: "application/pdf")
+            ])
+          ],
+          []
+        )
+
+      assert %{"contents" => [%{"role" => :user, "parts" => parts}]} = data
+
+      assert %{
+               "inlineData" => %{
+                 "mimeType" => "application/pdf",
+                 "data" => "base64-pdf-data"
+               }
+             } in parts
+    end
+
+    test "resolves the :media atom shorthands to a mimetype", %{vertex_ai: vertex_ai} do
+      # Callers may pass the codebase-wide `:pdf`/`:csv` atoms instead of a raw
+      # MIME string; both resolve to the same inlineData mimeType.
+      for {media, mime} <- [{:pdf, "application/pdf"}, {:csv, "text/csv"}] do
+        data =
+          ChatVertexAI.for_api(
+            vertex_ai,
+            [Message.new_user!([ContentPart.file!("base64-data", media: media)])],
+            []
+          )
+
+        assert %{"contents" => [%{"parts" => parts}]} = data
+        assert %{"inlineData" => %{"mimeType" => mime, "data" => "base64-data"}} in parts
+      end
+    end
+
     test "preserves media as nested functionResponse parts", %{vertex_ai: vertex_ai} do
       data =
         ChatVertexAI.for_api(
@@ -1222,6 +1299,51 @@ defmodule ChatModels.ChatVertexAITest do
     end
   end
 
+  describe "build_url" do
+    test "omits the OAuth token from the URL and authenticates via bearer header" do
+      expect(Req, :post, fn req_struct ->
+        # The token must not leak into the URL; it rides the Authorization header.
+        url = URI.to_string(req_struct.url)
+        refute url =~ "key="
+        assert url == "http://localhost:1234/models/#{@test_model}:generateContent"
+        assert req_struct.options[:auth] == {:bearer, "secret-oauth-token"}
+
+        {:error, RuntimeError.exception("stop here")}
+      end)
+
+      model =
+        ChatVertexAI.new!(%{
+          endpoint: "http://localhost:1234",
+          model: @test_model,
+          api_key: "secret-oauth-token"
+        })
+
+      assert {:error, _} = ChatVertexAI.call(model, "prompt", [])
+      verify!()
+    end
+
+    test "uses ?alt=sse (not &alt=sse) for the streaming URL" do
+      expect(Req, :post, fn req_struct, _opts ->
+        url = URI.to_string(req_struct.url)
+        refute url =~ "key="
+        assert url == "http://localhost:1234/models/#{@test_model}:streamGenerateContent?alt=sse"
+
+        {:error, RuntimeError.exception("stop here")}
+      end)
+
+      model =
+        ChatVertexAI.new!(%{
+          endpoint: "http://localhost:1234",
+          model: @test_model,
+          stream: true,
+          api_key: "secret-oauth-token"
+        })
+
+      assert {:error, _} = ChatVertexAI.call(model, "prompt", [])
+      verify!()
+    end
+  end
+
   describe "req_config" do
     test "merges req_config into the request (non-streaming)" do
       expect(Req, :post, fn req_struct ->
@@ -1264,6 +1386,95 @@ defmodule ChatModels.ChatVertexAITest do
 
       assert {:error, _} = ChatVertexAI.call(model, "prompt", [])
       verify!()
+    end
+  end
+
+  describe "cache/4" do
+    setup do
+      model =
+        ChatVertexAI.new!(%{
+          endpoint:
+            "https://aiplatform.us.rep.googleapis.com/v1/projects/proj/locations/us/publishers/google",
+          model: @test_model,
+          receive_timeout: 30_000
+        })
+
+      %{model: model}
+    end
+
+    test "posts to the location-level cachedContents URL with the full model ref", %{model: model} do
+      expect(Req, :post, fn req_struct ->
+        # cachedContents lives one level above publishers/google, same host.
+        assert URI.to_string(req_struct.url) ==
+                 "https://aiplatform.us.rep.googleapis.com/v1/projects/proj/locations/us/cachedContents"
+
+        body = req_struct.options[:json]
+
+        assert body["model"] ==
+                 "projects/proj/locations/us/publishers/google/models/#{@test_model}"
+
+        assert body["ttl"] == "300s"
+        assert [%{"role" => _, "parts" => _} | _] = body["contents"]
+
+        {:ok,
+         %Req.Response{
+           status: 200,
+           body: %{"name" => "projects/proj/locations/us/cachedContents/abc123"}
+         }}
+      end)
+
+      messages = [Message.new_system!("sys"), Message.new_user!("hello world")]
+
+      assert {:ok,
+              %ChatVertexAI{cached_content: "projects/proj/locations/us/cachedContents/abc123"}} =
+               ChatVertexAI.cache(model, [ttl: "300s"], messages, [])
+
+      verify!()
+    end
+
+    test "returns :noop when content is below the minimum cacheable size", %{model: model} do
+      expect(Req, :post, fn _req_struct ->
+        {:ok,
+         %Req.Response{
+           status: 400,
+           body: %{
+             "error" => %{
+               "message" =>
+                 "The cached content is of 1020 tokens. The minimum token count to start caching is 1024."
+             }
+           }
+         }}
+      end)
+
+      messages = [Message.new_user!("tiny")]
+      assert {:ok, :noop} = ChatVertexAI.cache(model, [], messages, [])
+      verify!()
+    end
+
+    test "surfaces other 400s as errors rather than swallowing them", %{model: model} do
+      expect(Req, :post, fn _req_struct ->
+        {:ok,
+         %Req.Response{
+           status: 400,
+           body: %{"error" => %{"message" => "Invalid model reference."}}
+         }}
+      end)
+
+      messages = [Message.new_user!("hello world")]
+      assert {:error, %Req.Response{status: 400}} = ChatVertexAI.cache(model, [], messages, [])
+      verify!()
+    end
+
+    test "for_api sends cachedContent and omits system/tools once cached", %{model: model} do
+      # After a successful cache, LLMChain blanks messages/tools; the request then
+      # carries only the new turn plus the cachedContent handle.
+      cached = %{model | cached_content: "projects/proj/locations/us/cachedContents/abc123"}
+
+      data = ChatVertexAI.for_api(cached, [Message.new_user!("follow-up question")], [])
+
+      assert data["cachedContent"] == "projects/proj/locations/us/cachedContents/abc123"
+      refute Map.has_key?(data, "system_instruction")
+      refute Map.has_key?(data, "tools")
     end
   end
 end

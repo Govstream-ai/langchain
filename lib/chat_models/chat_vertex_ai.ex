@@ -106,6 +106,11 @@ defmodule LangChain.ChatModels.ChatVertexAI do
     field :json_schema, :map, default: nil
     field :stream, :boolean, default: false
 
+    # Handle of a Gemini cached-content entry (set by `cache/4`). When present it
+    # is sent as `cachedContent` and the already-cached messages/tools are not
+    # resent. Format: projects/P/locations/L/cachedContents/ID.
+    field :cached_content, :string, default: nil
+
     # A list of maps for callback handlers (treated as internal)
     field :callbacks, {:array, :map}, default: []
 
@@ -209,6 +214,10 @@ defmodule LangChain.ChatModels.ChatVertexAI do
         "generationConfig" => generation_config_params
       }
       |> Utils.conditionally_add_to_map("system_instruction", for_api(sys_instructions))
+      # When content is cached, `cachedContent` carries the system instruction and
+      # tools; Vertex rejects re-sending them. `LLMChain.cache/2` already blanks
+      # the chain's messages/tools after caching, so there's nothing to strip here.
+      |> Utils.conditionally_add_to_map("cachedContent", vertex_ai.cached_content)
 
     if functions && not Enum.empty?(functions) do
       req
@@ -307,6 +316,19 @@ defmodule LangChain.ChatModels.ChatVertexAI do
     }
   end
 
+  # Inline document data (e.g. a PDF uploaded for the DocumentClassifier).
+  # ChatGoogleAI has an equivalent clause; Vertex was missing it, so a :file
+  # part hit no clause and raised FunctionClauseError. Vertex uses camelCase
+  # inlineData/mimeType (unlike AI Studio's inline_data/mime_type).
+  defp for_api(%ContentPart{type: :file} = part) do
+    %{
+      "inlineData" => %{
+        "mimeType" => file_mime_type(Keyword.get(part.options || [], :media)),
+        "data" => part.content
+      }
+    }
+  end
+
   defp for_api(%ToolCall{metadata: %{thought_signature: signature}} = call)
        when is_binary(signature) do
     %{
@@ -350,6 +372,16 @@ defmodule LangChain.ChatModels.ChatVertexAI do
 
   defp for_api(nil), do: nil
 
+  # Resolve a ContentPart :media option to a MIME string. Accepts the atom
+  # shorthands and, as permitworld callers do, a raw MIME string verbatim.
+  defp file_mime_type(:pdf), do: "application/pdf"
+  defp file_mime_type(:csv), do: "text/csv"
+  defp file_mime_type(mime) when is_binary(mime), do: mime
+
+  defp file_mime_type(other) do
+    raise LangChainError, "Received unsupported media type for ContentPart: #{inspect(other)}"
+  end
+
   defp maybe_add_function_response_parts(
          %{"functionResponse" => function_response} = data,
          [_ | _] = response_parts
@@ -362,13 +394,7 @@ defmodule LangChain.ChatModels.ChatVertexAI do
   defp tool_result_response_for_api(nil), do: %{}
 
   defp tool_result_response_for_api(content) when is_binary(content) do
-    case Jason.decode(content) do
-      {:ok, data} ->
-        data
-
-      {:error, %Jason.DecodeError{}} ->
-        %{"result" => content}
-    end
+    decode_tool_result_response(content)
   end
 
   defp tool_result_response_for_api(content_parts) when is_list(content_parts) do
@@ -379,13 +405,20 @@ defmodule LangChain.ChatModels.ChatVertexAI do
         %{}
 
       text_content ->
-        case Jason.decode(text_content) do
-          {:ok, data} ->
-            data
+        decode_tool_result_response(text_content)
+    end
+  end
 
-          {:error, %Jason.DecodeError{}} ->
-            %{"result" => text_content}
-        end
+  # Vertex requires functionResponse.response to be a Struct (JSON object). A
+  # tool may return a JSON array or scalar (e.g. GIS tools return a top-level
+  # array), which decodes to a non-map — wrap those so the proto stays valid.
+  # (The AI Studio endpoint tolerates this; Vertex 400s with "Proto field is
+  # not repeating, cannot start list".)
+  defp decode_tool_result_response(text) do
+    case Jason.decode(text) do
+      {:ok, data} when is_map(data) -> data
+      {:ok, data} -> %{"result" => data}
+      {:error, %Jason.DecodeError{}} -> %{"result" => text}
     end
   end
 
@@ -623,17 +656,98 @@ defmodule LangChain.ChatModels.ChatVertexAI do
 
   @spec build_url(t()) :: String.t()
   defp build_url(%ChatVertexAI{endpoint: endpoint, model: model} = vertex_ai) do
-    "#{endpoint}/models/#{model}:#{get_action(vertex_ai)}?key=#{get_api_key(vertex_ai)}"
+    # Auth is the OAuth bearer token (set on the request). The legacy `?key=`
+    # query param is an AI Studio holdover — on Vertex it duplicated the bearer
+    # token into the URL (logs/proxies/telemetry) while doing nothing, so it's
+    # dropped here.
+    "#{endpoint}/models/#{model}:#{get_action(vertex_ai)}"
     |> use_sse(vertex_ai)
   end
 
   @spec use_sse(String.t(), t()) :: String.t()
-  defp use_sse(url, %ChatVertexAI{stream: true}), do: url <> "&alt=sse"
+  defp use_sse(url, %ChatVertexAI{stream: true}), do: url <> "?alt=sse"
   defp use_sse(url, _model), do: url
 
   @spec get_action(t()) :: String.t()
   defp get_action(%ChatVertexAI{stream: false}), do: "generateContent"
   defp get_action(%ChatVertexAI{stream: true}), do: "streamGenerateContent"
+
+  @doc """
+  Create a Gemini context-cache entry for the given messages/tools and return the
+  model updated with its `cached_content` handle. Called by `LLMChain.cache/2`.
+
+  The Vertex `cachedContents` resource lives at the location level (not under
+  `publishers/google`), so the URL is derived from `:endpoint`. Mirrors
+  `ChatGoogleAI.cache/4` but uses the OAuth bearer token and Vertex's
+  below-minimum error wording. Content under the model's minimum cacheable token
+  count (2,048 for gemini-2.5-pro, 1,024 for 2.5-flash) yields `{:ok, :noop}`, so
+  the caller runs uncached rather than failing.
+  """
+  @spec cache(t(), keyword(), [Message.t()], [Function.t()]) ::
+          {:ok, t()} | {:ok, :noop} | {:error, any()}
+  def cache(%ChatVertexAI{} = vertex_ai, cache_opts, messages, tools) do
+    ttl = Keyword.get(cache_opts, :ttl, nil)
+
+    body =
+      for_api(vertex_ai, messages, tools)
+      |> Map.take(["contents", "system_instruction", "tools"])
+      |> Map.put("model", cache_model_ref(vertex_ai))
+      |> Utils.conditionally_add_to_map("ttl", ttl)
+
+    Req.new(
+      url: build_cache_url(vertex_ai),
+      json: body,
+      receive_timeout: vertex_ai.receive_timeout,
+      retry: :transient,
+      max_retries: 3,
+      retry_delay: fn attempt -> 300 * attempt end,
+      auth: {:bearer, get_api_key(vertex_ai)}
+    )
+    |> Req.merge(vertex_ai.req_config |> Keyword.new())
+    |> Req.post()
+    |> case do
+      {:ok, %Req.Response{status: 400, body: %{"error" => %{"message" => message}}} = resp} ->
+        # Vertex: "The cached content is of N tokens. The minimum token count to
+        # start caching is M." Below the minimum, run uncached instead of failing.
+        if String.contains?(message, "minimum token count to start caching") do
+          {:ok, :noop}
+        else
+          {:error, resp}
+        end
+
+      {:ok, %Req.Response{status: 200, body: %{"name" => cache_name}}} ->
+        {:ok, %{vertex_ai | cached_content: cache_name}}
+
+      {:ok, error} ->
+        {:error, error}
+
+      {:error, error} ->
+        {:error, error}
+    end
+  end
+
+  # `cachedContents` sits at .../locations/L/cachedContents — one level above the
+  # publisher path that generateContent uses. Strip the publisher suffix from the
+  # endpoint so the host (regional vs `us`/`eu` multi-region) is preserved.
+  @spec build_cache_url(t()) :: String.t()
+  defp build_cache_url(%ChatVertexAI{endpoint: endpoint}) do
+    base = String.replace_suffix(endpoint, "/publishers/google", "")
+    "#{base}/cachedContents"
+  end
+
+  # The cache body's `model` is the full resource path, e.g.
+  # projects/P/locations/L/publishers/google/models/MODEL — the endpoint's path
+  # with the leading API-version segment (`v1`, `v1beta1`, …) dropped.
+  @spec cache_model_ref(t()) :: String.t()
+  defp cache_model_ref(%ChatVertexAI{endpoint: endpoint, model: model}) do
+    resource =
+      URI.parse(endpoint).path
+      |> String.trim_leading("/")
+      |> String.split("/", parts: 2)
+      |> List.last()
+
+    "#{resource}/models/#{model}"
+  end
 
   def complete_final_delta(data) when is_list(data) do
     update_in(data, [Access.at(-1), Access.at(-1)], &%{&1 | status: :complete})

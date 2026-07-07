@@ -28,6 +28,34 @@ set of divergences, not a history).
     contributing upstream.
 - Files: `lib/chat_models/chat_google_ai.ex`, `test/chat_models/chat_google_ai_test.exs`
 
+## Gemini Vertex serialization — `ChatVertexAI`
+
+- Wrap non-object tool results so `functionResponse.response` stays a JSON
+  object — Vertex 400s on a top-level array (our GIS tools return them), which
+  `ChatGoogleAI`'s object wrapper had masked. (`7e5a35c`)
+- Add the missing `:file` `for_api/1` clause so inline documents (PDFs)
+  serialize to Vertex's `inlineData`/`mimeType` instead of raising
+  `FunctionClauseError`; mirrors `ChatGoogleAI`. (`130cce1`)
+- Implement `cache/4` + `cached_content` for Gemini context caching;
+  `LLMChain.cache/2` previously hit `:undef` on Vertex. POSTs to the
+  `cachedContents` endpoint (derived from `:endpoint`, OAuth bearer);
+  under-minimum payloads return `{:ok, :noop}` and run uncached.
+  (`1386c08`, `eaab2cf`)
+- Drop the `?key=` query param from `build_url/1`. It's an AI Studio holdover:
+  on Vertex, auth is the OAuth bearer token, and `get_api_key/1` was also
+  interpolating that token into the request URL (leaking it to logs/proxies/
+  telemetry) while contributing nothing. Streaming now uses `?alt=sse` instead
+  of `&alt=sse`.
+  - _Upstream disposition:_ the array-response and `?key=` fixes are genuine
+    upstream defects — the array fix a regression from brainlid/langchain#491,
+    the `?key=` leak present since `ChatVertexAI` was added; contribute both
+    as-is. The `:file` clause and `cache/4` are the Vertex twins of
+    `ChatGoogleAI` features; caching has no permitworld coupling, but the
+    `:file` clause's raw-MIME-string acceptance carries the same
+    `attachment.mimetype` coupling as the `ChatGoogleAI` entry above — normalize
+    before contributing.
+- Files: `lib/chat_models/chat_vertex_ai.ex`, `test/chat_models/chat_vertex_ai_test.exs`
+
 ## Gemini context caching — `ChatGoogleAI` + `LLMChain`
 
 - `LLMChain.cache/1` → `ChatGoogleAI.cache/3`: creates a Gemini cached-content
