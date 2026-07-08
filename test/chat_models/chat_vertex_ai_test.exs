@@ -900,6 +900,41 @@ defmodule ChatModels.ChatVertexAITest do
       assert error_received.original == response
     end
 
+    test "classifies a Vertex RESOURCE_EXHAUSTED (429) error as resource_exhausted", %{
+      model: model
+    } do
+      response = %{
+        "error" => %{
+          "code" => 429,
+          "message" => "Resource exhausted. Please try again later.",
+          "status" => "RESOURCE_EXHAUSTED"
+        }
+      }
+
+      assert {:error, %LangChainError{} = error} =
+               ChatVertexAI.do_process_response(model, response)
+
+      assert error.type == "resource_exhausted"
+      assert error.message =~ "exhausted"
+      assert error.original == response
+    end
+
+    test "classifies a Vertex NOT_FOUND (404) error as not_found", %{model: model} do
+      response = %{
+        "error" => %{
+          "code" => 404,
+          "message" => "models/gemini-2.5-flash is not found",
+          "status" => "NOT_FOUND"
+        }
+      }
+
+      assert {:error, %LangChainError{} = error} =
+               ChatVertexAI.do_process_response(model, response)
+
+      assert error.type == "not_found"
+      assert error.message =~ "not found"
+    end
+
     test "handles Jason.DecodeError", %{model: model} do
       response = {:error, %Jason.DecodeError{}}
 
