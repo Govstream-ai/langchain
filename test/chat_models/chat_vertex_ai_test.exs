@@ -920,6 +920,45 @@ defmodule ChatModels.ChatVertexAITest do
       assert error.message == "Unexpected response"
     end
 
+    test "a malformed (non-map) usageMetadata degrades to no token usage", %{model: model} do
+      response = %{
+        "candidates" => [
+          %{
+            "content" => %{"role" => "model", "parts" => [%{"text" => "Hello User!"}]},
+            "finishReason" => "STOP",
+            "index" => 0
+          }
+        ],
+        "usageMetadata" => "not-a-map"
+      }
+
+      # The message still parses; the junk usage is dropped instead of raising
+      # a BadMapError that would escape call/3's LangChainError-only rescue.
+      assert [%Message{} = struct] = ChatVertexAI.do_process_response(model, response)
+      assert struct.role == :assistant
+    end
+
+    test "a non-map content part raises a classified LangChainError", %{model: model} do
+      response = %{
+        "candidates" => [
+          %{
+            "content" => %{"role" => "model", "parts" => ["bare string, not a map"]},
+            "finishReason" => "STOP",
+            "index" => 0
+          }
+        ]
+      }
+
+      # Raised (not returned) so it classifies wherever it occurs; call/3
+      # rescues it into an {:error, %LangChainError{}} tuple in production.
+      error =
+        assert_raise LangChainError, fn ->
+          ChatVertexAI.do_process_response(model, response, MessageDelta)
+        end
+
+      assert error.type == "unexpected_response"
+    end
+
     test "handles receiving a message with token usage", %{model: model} do
       response = %{
         "candidates" => [
@@ -956,6 +995,15 @@ defmodule ChatModels.ChatVertexAITest do
   end
 
   describe "filter_parts_for_types/2" do
+    test "a non-map part raises a classified LangChainError" do
+      error =
+        assert_raise LangChainError, fn ->
+          ChatVertexAI.filter_parts_for_types([%{"text" => "ok"}, 42], ["text"])
+        end
+
+      assert error.type == "unexpected_response"
+    end
+
     test "returns a single functionCall type" do
       parts = [
         %{"text" => "I think I'll call this function."},
@@ -1001,6 +1049,41 @@ defmodule ChatModels.ChatVertexAITest do
                %{"text" => "I have text"},
                %{"text" => "I have more text"}
              ]
+    end
+  end
+
+  describe "complete_final_delta/1" do
+    test "marks the last delta of the last chunk complete" do
+      delta_a = MessageDelta.new!(%{role: :assistant, content: "Hel", status: :incomplete})
+      delta_b = MessageDelta.new!(%{role: :assistant, content: "lo", status: :incomplete})
+
+      assert [[%MessageDelta{content: "Hel", status: :incomplete}], [completed]] =
+               ChatVertexAI.complete_final_delta([[delta_a], [delta_b]])
+
+      assert %MessageDelta{content: "lo", status: :complete} = completed
+    end
+
+    test "a trailing failed-chunk parse raises a classified LangChainError" do
+      delta = MessageDelta.new!(%{role: :assistant, content: "Hel", status: :incomplete})
+      failed = {:error, LangChainError.exception(type: "changeset", message: "bad chunk")}
+
+      # Raised (not returned) so it classifies wherever it occurs; call/3
+      # rescues it into an {:error, %LangChainError{}} tuple in production.
+      error =
+        assert_raise LangChainError, fn ->
+          ChatVertexAI.complete_final_delta([[delta], [failed]])
+        end
+
+      assert error.type == "unexpected_response"
+    end
+
+    test "an empty stream raises a classified LangChainError" do
+      error =
+        assert_raise LangChainError, fn ->
+          ChatVertexAI.complete_final_delta([])
+        end
+
+      assert error.type == "unexpected_response"
     end
   end
 

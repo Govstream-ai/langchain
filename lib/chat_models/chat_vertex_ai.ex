@@ -749,8 +749,25 @@ defmodule LangChain.ChatModels.ChatVertexAI do
     "#{resource}/models/#{model}"
   end
 
+  # Explicit matches rather than a bare `update_in .. &%{&1 | status: ..}`:
+  # the accumulated stream data can end in something other than a MessageDelta
+  # (an `{:error, LangChainError}` from a failed chunk parse, or an empty
+  # stream), and those must surface as a classified LangChainError — which
+  # `call/3` rescues into an error tuple callers treat as retryable — not as a
+  # BadMapError/KeyError that escapes the rescue.
   def complete_final_delta(data) when is_list(data) do
-    update_in(data, [Access.at(-1), Access.at(-1)], &%{&1 | status: :complete})
+    with [_ | _] = last_chunk <- List.last(data),
+         %MessageDelta{} = delta <- List.last(last_chunk) do
+      completed = List.replace_at(last_chunk, -1, %{delta | status: :complete})
+      List.replace_at(data, -1, completed)
+    else
+      other ->
+        raise LangChainError.exception(
+                type: "unexpected_response",
+                message: "Unexpected final stream delta: #{inspect(other)}",
+                original: other
+              )
+    end
   end
 
   def do_process_response(model, response, message_type \\ Message)
@@ -924,7 +941,23 @@ defmodule LangChain.ChatModels.ChatVertexAI do
           end
       end
 
-    content = Enum.map_join(parts, & &1["text"])
+    # A non-map part means the provider (or a gateway in between) sent a shape
+    # we don't understand. Raise a classified error — `call/3` rescues
+    # LangChainError into an error tuple, and callers treat
+    # `unexpected_response` as retryable — rather than letting Access on a
+    # non-map crash with an exception that escapes the rescue.
+    content =
+      Enum.map_join(parts, fn
+        %{} = part ->
+          part["text"]
+
+        other ->
+          raise LangChainError.exception(
+                  type: "unexpected_response",
+                  message: "Unexpected non-map content part: #{inspect(other)}",
+                  original: other
+                )
+      end)
 
     case message_type.new(%{
            "content" => content,
@@ -962,8 +995,18 @@ defmodule LangChain.ChatModels.ChatVertexAI do
 
   @doc false
   def filter_parts_for_types(parts, types) when is_list(parts) and is_list(types) do
-    Enum.filter(parts, fn p ->
-      Enum.any?(types, &Map.has_key?(p, &1))
+    Enum.filter(parts, fn
+      %{} = p ->
+        Enum.any?(types, &Map.has_key?(p, &1))
+
+      other ->
+        # Same rationale as the non-map part handling in do_process_response:
+        # classify instead of BadMapError-ing past call/3's rescue.
+        raise LangChainError.exception(
+                type: "unexpected_response",
+                message: "Unexpected non-map content part: #{inspect(other)}",
+                original: other
+              )
     end)
   end
 
@@ -1004,7 +1047,10 @@ defmodule LangChain.ChatModels.ChatVertexAI do
     end
   end
 
-  defp get_token_usage(%{"usageMetadata" => usage} = _response_body) do
+  # `is_map` guard: usage is optional metadata, so a malformed (non-map)
+  # `usageMetadata` degrades to "no usage reported" instead of a BadMapError
+  # that would escape the LangChainError-only rescue in `call/3`.
+  defp get_token_usage(%{"usageMetadata" => usage} = _response_body) when is_map(usage) do
     # extract out the reported response token usage
     TokenUsage.new!(%{
       input: Map.get(usage, "promptTokenCount", 0),
