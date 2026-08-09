@@ -1259,7 +1259,7 @@ defmodule LangChain.ChatModels.ChatGoogleAI do
     |> Req.merge(google_ai.req_config |> Keyword.new())
     |> Req.post()
     |> case do
-      {:ok, resp = %Req.Response{status: 400, body: %{"error" => %{"message" => message}}}} ->
+      {:ok, resp = %Req.Response{status: 400}} ->
         {:ok, :noop}
       {:ok, %Req.Response{status: 200, body: %{"name" => cache_name}}} ->
         {:ok, %{google_ai | cached_content: cache_name}}
