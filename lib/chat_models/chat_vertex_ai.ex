@@ -706,15 +706,11 @@ defmodule LangChain.ChatModels.ChatVertexAI do
     |> Req.merge(vertex_ai.req_config |> Keyword.new())
     |> Req.post()
     |> case do
-      {:ok, %Req.Response{status: 400, body: %{"error" => %{"message" => message}}} = resp} ->
-        # Vertex: "The cached content is of N tokens. The minimum token count to
-        # start caching is M." Below the minimum, run uncached instead of failing.
-        if String.contains?(message, "minimum token count to start caching") do
-          {:ok, :noop}
-        else
-          {:error, resp}
-        end
-
+      {:ok, %Req.Response{status: 400}} ->
+        {:ok, :noop}
+      {:error, %Req.Response{status: 400}} ->
+        Logger.info("Gemini returned a 400 for the cache request")
+        {:ok, :noop}
       {:ok, %Req.Response{status: 200, body: %{"name" => cache_name}}} ->
         {:ok, %{vertex_ai | cached_content: cache_name}}
 
