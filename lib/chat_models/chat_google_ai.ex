@@ -1260,12 +1260,7 @@ defmodule LangChain.ChatModels.ChatGoogleAI do
     |> Req.post()
     |> case do
       {:ok, resp = %Req.Response{status: 400, body: %{"error" => %{"message" => message}}}} ->
-        if String.contains?(message, "Cached content is too small.") do
-          {:ok, :noop}
-        else
-          {:error, resp}
-        end
-
+        {:ok, :noop}
       {:ok, %Req.Response{status: 200, body: %{"name" => cache_name}}} ->
         {:ok, %{google_ai | cached_content: cache_name}}
 
