@@ -936,8 +936,9 @@ defmodule LangChain.ChatModels.ChatVertexAI do
     end
   end
 
-  def do_process_response(_model, %{"error" => %{"message" => reason}} = response, _) do
-    {:error, LangChainError.exception(message: reason, original: response)}
+  def do_process_response(_model, %{"error" => %{"message" => reason} = error} = response, _) do
+    error_type = google_error_type(error)
+    {:error, LangChainError.exception(type: error_type, message: reason, original: response)}
   end
 
   def do_process_response(_model, {:error, %Jason.DecodeError{} = response}, _) do
@@ -955,6 +956,25 @@ defmodule LangChain.ChatModels.ChatVertexAI do
        original: other
      )}
   end
+
+  # Convert a Vertex/Google error envelope into a LangChainError type string.
+  # Vertex serves Gemini via Dynamic Shared Quota and returns 429 /
+  # RESOURCE_EXHAUSTED under load; classifying it lets callers recognize a rate
+  # limit (the error otherwise has type: nil and is indistinguishable from any
+  # other API error). Mirrors ChatGoogleAI.google_error_type/1.
+  defp google_error_type(%{"status" => status}) when is_binary(status) do
+    String.downcase(status)
+  end
+
+  defp google_error_type(%{"code" => code}) when is_integer(code) do
+    case code do
+      404 -> "not_found"
+      429 -> "resource_exhausted"
+      _ -> "api_error"
+    end
+  end
+
+  defp google_error_type(_), do: "api_error"
 
   @doc false
   def filter_parts_for_types(parts, types) when is_list(parts) and is_list(types) do
