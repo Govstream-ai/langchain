@@ -1451,7 +1451,7 @@ defmodule ChatModels.ChatVertexAITest do
       verify!()
     end
 
-    test "surfaces other 400s as errors rather than swallowing them", %{model: model} do
+    test "swallows other 400s, google constantly changes their error message, there is no stable way to dilineate a 400 due to cache issues vs other issues.", %{model: model} do
       expect(Req, :post, fn _req_struct ->
         {:ok,
          %Req.Response{
@@ -1461,7 +1461,7 @@ defmodule ChatModels.ChatVertexAITest do
       end)
 
       messages = [Message.new_user!("hello world")]
-      assert {:error, %Req.Response{status: 400}} = ChatVertexAI.cache(model, [], messages, [])
+      assert {:ok, :noop} = ChatVertexAI.cache(model, [], messages, [])
       verify!()
     end
 
