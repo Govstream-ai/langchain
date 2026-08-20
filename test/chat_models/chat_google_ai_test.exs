@@ -368,7 +368,7 @@ defmodule ChatModels.ChatGoogleAITest do
       message =
         Message.new_user!([
           ContentPart.text!("User prompt"),
-          ContentPart.file!("pdf_base64_data", media: :pdf)
+          ContentPart.file!("pdf_base64_data", media: "application/pdf")
         ])
 
       data = ChatGoogleAI.for_api(google_ai, [message], [])
@@ -395,7 +395,7 @@ defmodule ChatModels.ChatGoogleAITest do
       message =
         Message.new_user!([
           ContentPart.text!("User prompt"),
-          ContentPart.file!("column_a,column_b", media: :csv)
+          ContentPart.file!("column_a,column_b", media: "text/csv")
         ])
 
       data = ChatGoogleAI.for_api(google_ai, [message], [])
