@@ -1451,7 +1451,8 @@ defmodule ChatModels.ChatVertexAITest do
       verify!()
     end
 
-    test "swallows other 400s, google constantly changes their error message, there is no stable way to dilineate a 400 due to cache issues vs other issues.", %{model: model} do
+    test "swallows other 400s, google constantly changes their error message, there is no stable way to dilineate a 400 due to cache issues vs other issues.",
+         %{model: model} do
       expect(Req, :post, fn _req_struct ->
         {:ok,
          %Req.Response{

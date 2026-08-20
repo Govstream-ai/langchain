@@ -708,9 +708,11 @@ defmodule LangChain.ChatModels.ChatVertexAI do
     |> case do
       {:ok, %Req.Response{status: 400}} ->
         {:ok, :noop}
+
       {:error, %Req.Response{status: 400}} ->
         Logger.info("Gemini returned a 400 for the cache request")
         {:ok, :noop}
+
       {:ok, %Req.Response{status: 200, body: %{"name" => cache_name}}} ->
         {:ok, %{vertex_ai | cached_content: cache_name}}
 

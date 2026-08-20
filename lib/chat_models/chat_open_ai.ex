@@ -691,6 +691,7 @@ defmodule LangChain.ChatModels.ChatOpenAI do
   def content_parts_for_api(%_{}, []) do
     nil
   end
+
   def content_parts_for_api(%_{} = model, content_parts) when is_list(content_parts) do
     Enum.map(content_parts, &content_part_for_api(model, &1))
   end
