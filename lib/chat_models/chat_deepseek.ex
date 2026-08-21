@@ -1270,4 +1270,10 @@ defmodule LangChain.ChatModels.ChatDeepSeek do
   def restore_from_map(%{"version" => 1} = data) do
     ChatDeepSeek.new(data)
   end
+
+  @doc """
+  Caching is not supported by this provider. Returns `{:ok, :noop}` so that
+  `LangChain.Chains.LLMChain.cache/2` returns the chain unmodified.
+  """
+  def cache(%ChatDeepSeek{} = _model, _cache_opts, _messages, _tools), do: {:ok, :noop}
 end

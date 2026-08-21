@@ -1082,5 +1082,11 @@ if Code.ensure_loaded?(ReqLLM) do
         _ -> nil
       end
     end
+
+    @doc """
+    Caching is not supported by this provider. Returns `{:ok, :noop}` so that
+    `LangChain.Chains.LLMChain.cache/2` returns the chain unmodified.
+    """
+    def cache(%ChatReqLLM{} = _model, _cache_opts, _messages, _tools), do: {:ok, :noop}
   end
 end

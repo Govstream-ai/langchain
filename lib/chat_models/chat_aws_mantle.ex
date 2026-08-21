@@ -835,4 +835,10 @@ defmodule LangChain.ChatModels.ChatAwsMantle do
   @spec get_api_key(t()) :: String.t() | nil
   def get_api_key(%ChatAwsMantle{api_key: api_key}) when is_binary(api_key), do: api_key
   def get_api_key(%ChatAwsMantle{}), do: Config.resolve(:aws_bearer_token_bedrock, nil)
+
+  @doc """
+  Caching is not supported by this provider. Returns `{:ok, :noop}` so that
+  `LangChain.Chains.LLMChain.cache/2` returns the chain unmodified.
+  """
+  def cache(%ChatAwsMantle{} = _model, _cache_opts, _messages, _tools), do: {:ok, :noop}
 end
