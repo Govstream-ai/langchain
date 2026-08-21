@@ -2034,4 +2034,10 @@ defmodule LangChain.ChatModels.ChatOpenAIResponses do
   def retry_on_fallback?(%LangChainError{type: "timeout"}), do: true
   def retry_on_fallback?(%LangChainError{type: "too_many_requests"}), do: true
   def retry_on_fallback?(_), do: false
+
+  @doc """
+  Caching is not supported by this provider. Returns `{:ok, :noop}` so that
+  `LangChain.Chains.LLMChain.cache/2` returns the chain unmodified.
+  """
+  def cache(%ChatOpenAIResponses{} = _model, _cache_opts, _messages, _tools), do: {:ok, :noop}
 end

@@ -1092,4 +1092,10 @@ defmodule LangChain.ChatModels.ChatPerplexity do
 
   defp maybe_put_metadata(map, _key, nil), do: map
   defp maybe_put_metadata(map, key, value), do: Map.put(map, key, value)
+
+  @doc """
+  Caching is not supported by this provider. Returns `{:ok, :noop}` so that
+  `LangChain.Chains.LLMChain.cache/2` returns the chain unmodified.
+  """
+  def cache(%ChatPerplexity{} = _model, _cache_opts, _messages, _tools), do: {:ok, :noop}
 end

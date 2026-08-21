@@ -2413,4 +2413,10 @@ defmodule LangChain.ChatModels.ChatAnthropic do
   def restore_from_map(%{"version" => 1} = data) do
     ChatAnthropic.new(data)
   end
+
+  @doc """
+  Caching is not supported by this provider. Returns `{:ok, :noop}` so that
+  `LangChain.Chains.LLMChain.cache/2` returns the chain unmodified.
+  """
+  def cache(%ChatAnthropic{} = _model, _cache_opts, _messages, _tools), do: {:ok, :noop}
 end
