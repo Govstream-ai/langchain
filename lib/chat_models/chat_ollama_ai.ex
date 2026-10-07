@@ -808,6 +808,7 @@ defmodule LangChain.ChatModels.ChatOllamaAI do
     case ToolCall.new(%{
            call_id: Ecto.UUID.generate(),
            type: :function,
+           status: :complete,
            name: name,
            arguments: args
          }) do

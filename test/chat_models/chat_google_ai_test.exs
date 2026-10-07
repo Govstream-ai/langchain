@@ -609,6 +609,34 @@ defmodule ChatModels.ChatGoogleAITest do
       assert call.arguments == %{"value" => 123}
     end
 
+    test "keeps parallel function calls separate when streamed", %{model: model} do
+      chunk = %{
+        "candidates" => [
+          %{
+            "content" => %{
+              "role" => "model",
+              "parts" => [
+                %{"functionCall" => %{"args" => %{"facts" => []}, "name" => "update_facts"}},
+                %{
+                  "functionCall" => %{
+                    "args" => %{"layers" => ["zoning"]},
+                    "name" => "show_layers"
+                  }
+                }
+              ]
+            },
+            "finishReason" => "STOP",
+            "index" => 0
+          }
+        ]
+      }
+
+      deltas = List.flatten([ChatGoogleAI.do_process_response(model, chunk, MessageDelta)])
+
+      assert [%ToolCall{name: "update_facts", status: :complete}, %ToolCall{name: "show_layers"}] =
+               MessageDelta.merge_deltas(deltas).tool_calls
+    end
+
     test "handles function calls with thoughtSignature (Gemini 3)", %{model: model} do
       response = %{
         "candidates" => [

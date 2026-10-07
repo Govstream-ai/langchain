@@ -875,7 +875,7 @@ defmodule LangChain.ChatModels.ChatVertexAI do
       call_id: "call-#{name}",
       name: name,
       arguments: raw_args,
-      complete: true,
+      status: :complete,
       index: data["index"],
       metadata:
         if(data["thoughtSignature"],

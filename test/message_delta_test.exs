@@ -160,6 +160,55 @@ defmodule LangChain.MessageDeltaTest do
       assert merged == expected
     end
 
+    # Gemini/Vertex (and Mistral, Ollama) send each tool call whole and give
+    # parallel calls no distinct index. Merging them by index fused them into
+    # one call with concatenated names, e.g. "update_factsshow_layers".
+    test "complete tool calls without distinct indexes stay separate" do
+      complete_call = fn name, args ->
+        ToolCall.new!(%{status: :complete, call_id: "call-#{name}", name: name, arguments: args})
+      end
+
+      delta =
+        MessageDelta.new!(%{
+          role: :assistant,
+          tool_calls: [
+            complete_call.("update_facts", %{"facts" => []}),
+            complete_call.("show_layers", %{"layers" => ["zoning"]})
+          ]
+        })
+
+      assert [first, second] = MessageDelta.merge_deltas([delta]).tool_calls
+      assert {first.name, first.arguments} == {"update_facts", %{"facts" => []}}
+      assert {second.name, second.arguments} == {"show_layers", %{"layers" => ["zoning"]}}
+      assert first.index != second.index
+    end
+
+    test "parallel complete calls to the same tool keep their own arguments" do
+      deltas =
+        for city <- ["Moab", "Portland"] do
+          MessageDelta.new!(%{
+            role: :assistant,
+            tool_calls: [
+              # Gemini derives call_id from the tool name, so these collide.
+              ToolCall.new!(%{
+                status: :complete,
+                call_id: "call-get_weather",
+                name: "get_weather",
+                arguments: %{"city" => city}
+              })
+            ]
+          })
+        end
+
+      assert [
+               %{arguments: %{"city" => "Moab"}, call_id: first_id},
+               %{arguments: %{"city" => "Portland"}, call_id: second_id}
+             ] = MessageDelta.merge_deltas(deltas).tool_calls
+
+      # Tool results are matched to calls by call_id, so they must be distinct.
+      assert first_id != second_id
+    end
+
     test "correctly merge multiple tool calls in a delta" do
       merged = MessageDelta.merge_deltas(deltas_for_multiple_tool_calls())
 

@@ -387,8 +387,44 @@ defmodule LangChain.MessageDelta do
        ) do
     calls = primary_calls || []
     initial = Enum.find(calls, &(&1.index == delta_call.index))
-    merged_call = ToolCall.merge(initial, delta_call)
-    %MessageDelta{acc | tool_calls: upsert_by_index(calls, merged_call)}
+
+    if separate_complete_calls?(initial, delta_call) do
+      # Providers that send whole calls (Gemini, Vertex, Mistral, Ollama) give
+      # parallel calls no distinct index, so they would otherwise be merged into
+      # one call with concatenated names and arguments. A complete call never
+      # continues another one: keep it as its own call.
+      index = next_index(calls)
+
+      # Gemini derives call_id from the tool name, so two calls to one tool
+      # collide; tool results are matched back to calls by call_id.
+      call_id =
+        if Enum.any?(calls, &(&1.call_id == delta_call.call_id)),
+          do: "#{delta_call.call_id}-#{index}",
+          else: delta_call.call_id
+
+      %MessageDelta{
+        acc
+        | tool_calls: calls ++ [%ToolCall{delta_call | index: index, call_id: call_id}]
+      }
+    else
+      merged_call = ToolCall.merge(initial, delta_call)
+      %MessageDelta{acc | tool_calls: upsert_by_index(calls, merged_call)}
+    end
+  end
+
+  defp separate_complete_calls?(
+         %ToolCall{status: :complete} = existing,
+         %ToolCall{status: :complete} = incoming
+       ),
+       do: existing != incoming
+
+  defp separate_complete_calls?(_existing, _incoming), do: false
+
+  defp next_index(calls) do
+    case calls |> Enum.map(& &1.index) |> Enum.filter(&is_integer/1) do
+      [] -> length(calls)
+      indexes -> max(Enum.max(indexes) + 1, length(calls))
+    end
   end
 
   @spec update_index(t(), t()) :: t()
