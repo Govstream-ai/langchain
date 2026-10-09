@@ -962,6 +962,30 @@ defmodule ChatModels.ChatGoogleAITest do
     end
   end
 
+  describe "cache/4" do
+    test "keeps the create response's usageMetadata alongside the cache handle" do
+      expect(Req, :post, fn _req ->
+        {:ok,
+         %Req.Response{
+           status: 200,
+           body: %{
+             "name" => "cachedContents/abc123",
+             "usageMetadata" => %{"totalTokenCount" => 4321}
+           }
+         }}
+      end)
+
+      llm = ChatGoogleAI.new!(%{model: "gemini-1.5-flash"})
+      messages = [Message.new_system!("sys"), Message.new_user!("hello world")]
+
+      assert {:ok,
+              %ChatGoogleAI{
+                cached_content: "cachedContents/abc123",
+                cached_content_usage: %{"totalTokenCount" => 4321}
+              }} = ChatGoogleAI.cache(llm, [ttl: "300s"], messages, [])
+    end
+  end
+
   describe "build_url/1" do
     test "builds the correct URL for the request" do
       llm = ChatGoogleAI.new!(%{model: "gemini-1.5-flash", stream: false})
