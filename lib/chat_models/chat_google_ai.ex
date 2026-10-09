@@ -137,6 +137,10 @@ defmodule LangChain.ChatModels.ChatGoogleAI do
     # Cached content, see here:
     # https://ai.google.dev/api/caching#cache_create-SHELL
     field :cached_content, :string, default: nil
+
+    # The `usageMetadata` of the cachedContents create response that set
+    # `cached_content`, so callers can report what creating the cache cost.
+    field :cached_content_usage, :map, default: nil
   end
 
   @type t :: %ChatGoogleAI{}
@@ -1267,8 +1271,13 @@ defmodule LangChain.ChatModels.ChatGoogleAI do
         Logger.info("Gemini returned a 400 for the cache request")
         {:ok, :noop}
 
-      {:ok, %Req.Response{status: 200, body: %{"name" => cache_name}}} ->
-        {:ok, %{google_ai | cached_content: cache_name}}
+      {:ok, %Req.Response{status: 200, body: %{"name" => cache_name} = body}} ->
+        {:ok,
+         %{
+           google_ai
+           | cached_content: cache_name,
+             cached_content_usage: Map.get(body, "usageMetadata")
+         }}
 
       {:ok, error} ->
         {:error, error}
