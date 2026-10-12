@@ -111,6 +111,10 @@ defmodule LangChain.ChatModels.ChatVertexAI do
     # resent. Format: projects/P/locations/L/cachedContents/ID.
     field :cached_content, :string, default: nil
 
+    # The `usageMetadata` of the cachedContents create response that set
+    # `cached_content`, so callers can report what creating the cache cost.
+    field :cached_content_usage, :map, default: nil
+
     # A list of maps for callback handlers (treated as internal)
     field :callbacks, {:array, :map}, default: []
 
@@ -713,8 +717,13 @@ defmodule LangChain.ChatModels.ChatVertexAI do
         Logger.info("Gemini returned a 400 for the cache request")
         {:ok, :noop}
 
-      {:ok, %Req.Response{status: 200, body: %{"name" => cache_name}}} ->
-        {:ok, %{vertex_ai | cached_content: cache_name}}
+      {:ok, %Req.Response{status: 200, body: %{"name" => cache_name} = body}} ->
+        {:ok,
+         %{
+           vertex_ai
+           | cached_content: cache_name,
+             cached_content_usage: Map.get(body, "usageMetadata")
+         }}
 
       {:ok, error} ->
         {:error, error}

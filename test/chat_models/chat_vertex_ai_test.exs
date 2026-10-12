@@ -1419,15 +1419,20 @@ defmodule ChatModels.ChatVertexAITest do
         {:ok,
          %Req.Response{
            status: 200,
-           body: %{"name" => "projects/proj/locations/us/cachedContents/abc123"}
+           body: %{
+             "name" => "projects/proj/locations/us/cachedContents/abc123",
+             "usageMetadata" => %{"totalTokenCount" => 4321}
+           }
          }}
       end)
 
       messages = [Message.new_system!("sys"), Message.new_user!("hello world")]
 
       assert {:ok,
-              %ChatVertexAI{cached_content: "projects/proj/locations/us/cachedContents/abc123"}} =
-               ChatVertexAI.cache(model, [ttl: "300s"], messages, [])
+              %ChatVertexAI{
+                cached_content: "projects/proj/locations/us/cachedContents/abc123",
+                cached_content_usage: %{"totalTokenCount" => 4321}
+              }} = ChatVertexAI.cache(model, [ttl: "300s"], messages, [])
 
       verify!()
     end
